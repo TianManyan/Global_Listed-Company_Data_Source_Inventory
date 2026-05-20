@@ -1,0 +1,13 @@
+# TradeInt — SEC EDGAR 8-K Watchlist
+# Format: one ticker per row (column header is 'ticker')
+# Lines starting with '#' and blank lines are ignored.
+# Add or remove tickers freely; column 'notes' is optional.
+ticker,notes
+AAPL,Apple Inc.
+MSFT,Microsoft Corporation
+TSLA,Tesla Inc.
+NVDA,NVIDIA Corporation
+AMZN,Amazon.com Inc.
+GOOGL,Alphabet Inc. Class A
+META,Meta Platforms Inc.
+JPM,JPMorgan Chase & Co.

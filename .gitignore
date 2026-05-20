@@ -1,0 +1,14 @@
+# Output files (regenerated each run)
+filings.csv
+
+# Logs (local only)
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+
+# macOS
+.DS_Store
