@@ -1,0 +1,40 @@
+name: Weekly 8-K Watchlist Pull
+
+on:
+  schedule:
+    # Every Monday at 09:00 UTC (17:00 Singapore time)
+    - cron: '0 9 * * 1'
+  workflow_dispatch:  # Allow manual trigger from GitHub UI
+
+jobs:
+  pull-8k-filings:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Check out the repo so the runner has access to all files
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Set up Python
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # 3. Install the only non-stdlib dependency
+      - name: Install dependencies
+        run: pip install requests
+
+      # 4. Run the script — reads watchlist.csv, looks back 7 days
+      - name: Run edgar_8k_pull.py
+        run: |
+          python edgar_8k_pull.py --days 7 --out filings.csv
+
+      # 5. Upload filings.csv as a downloadable Artifact (kept for 30 days)
+      - name: Upload filings CSV as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 8k-filings-${{ github.run_id }}
+          path: filings.csv
+          retention-days: 30
+          if-no-files-found: warn
