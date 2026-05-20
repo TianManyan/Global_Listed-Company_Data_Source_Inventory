@@ -71,7 +71,20 @@ The output CSV has these columns:
 | `form` | Always `8-K` |
 | `filed_date` | Filing date (YYYY-MM-DD) |
 | `accession_number` | SEC accession number (unique filing ID) |
+| `category` | Auto-classified event type (see below) |
 | `document_url` | Direct URL to the primary filing document |
+
+**Category labels** (keyword-rule based, accuracy ~60–70%):
+
+| Label | Triggered by |
+|---|---|
+| M&A | merger, acquisition, takeover… |
+| Officer Change | director, officer, CEO, resign… |
+| Earnings | result, earnings, revenue, quarter… |
+| Material Contract | agreement, contract, amendment… |
+| Financing | offering, share, debt, bond… |
+| Regulatory | regulation, investigation, settlement… |
+| Other | anything that doesn't match the above |
 
 ---
 

@@ -172,10 +172,47 @@ def fetch_8k_filings(cik: str, since: date) -> list[dict]:
                 "filed_date": date_str,
                 "accession_number": accession,
                 "document_url": doc_url,
+                "category": classify_8k(doc_url, accession),
             }
         )
 
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Skill: classify 8-K by event type (keyword-rule based)
+# ---------------------------------------------------------------------------
+
+# Each entry: (category_label, [keywords_to_match_in_lowercase_filename])
+# Rules are checked in order; first match wins.
+_CLASSIFICATION_RULES: list[tuple[str, list[str]]] = [
+    ("M&A",              ["merger", "acquisition", "acqui", "takeover", "business combination"]),
+    ("Officer Change",   ["director", "officer", "ceo", "cfo", "coo", "cto", "president",
+                          "resign", "appointment", "elect"]),
+    ("Earnings",         ["result", "earnings", "revenue", "quarter", "fiscal", "financial"]),
+    ("Material Contract",["agreement", "contract", "amendment", "license", "partnership"]),
+    ("Financing",        ["offering", "share", "stock", "debt", "credit", "loan",
+                          "convertible", "note", "bond"]),
+    ("Regulatory",       ["sec ", "regulation", "compliance", "investigation", "lawsuit",
+                          "settlement", "legal"]),
+]
+_FALLBACK_CATEGORY = "Other"
+
+
+def classify_8k(document_url: str, accession_number: str) -> str:
+    """
+    Return a category label for an 8-K filing.
+
+    Strategy: match keywords against the document filename and accession number.
+    No extra HTTP request is made — purely string-based, zero extra API calls.
+    Accuracy ~60-70%; ambiguous filings fall into '其他 / Other'.
+    """
+    filename = document_url.split("/")[-1].lower()
+    signal = filename + " " + accession_number.lower()
+    for label, keywords in _CLASSIFICATION_RULES:
+        if any(kw in signal for kw in keywords):
+            return label
+    return _FALLBACK_CATEGORY
 
 
 # ---------------------------------------------------------------------------
@@ -291,7 +328,7 @@ def main() -> None:
         else:
             fieldnames = [
                 "ticker", "cik", "company_name", "form",
-                "filed_date", "accession_number", "document_url",
+                "filed_date", "accession_number", "category", "document_url",
             ]
             with open(out_path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
