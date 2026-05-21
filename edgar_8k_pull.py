@@ -1,6 +1,8 @@
 """
 edgar_8k_pull.py — Pull recent 8-K filings from SEC EDGAR for a ticker watchlist.
 
+Output fields follow the TradeInt cross-source standard schema (see schema.md).
+
 Dependencies: requests  (only non-stdlib dep; pip install requests)
 Rate limit:   ≤ 10 requests/second — SEC documented limit
               https://www.sec.gov/about/developer-resources
@@ -24,12 +26,10 @@ Run log is appended to logs/run.log automatically.
 
 import argparse
 import csv
-import json
-import os
 import sys
 import time
 import traceback
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -57,6 +57,29 @@ HEADERS = {"User-Agent": "TradeInt research@tradeint.com"}
 MIN_INTERVAL = 0.11  # seconds between requests
 
 _last_request_time: float = 0.0
+
+# ---------------------------------------------------------------------------
+# Standard output fields — matches TradeInt cross-source schema (schema.md)
+# ---------------------------------------------------------------------------
+FIELDNAMES = [
+    # Layer 1 — Source Metadata
+    "source",
+    "exchange",
+    "jurisdiction",
+    # Layer 2 — Company Identity
+    "company_name",
+    "ticker",
+    "source_id",
+    "lei",          # optional — resolve via GLEIF
+    "isin",         # optional — resolve via OpenFIGI
+    "figi",         # optional — resolve via OpenFIGI
+    # Layer 3 — Filing
+    "filing_date",
+    "form_type",
+    "category",
+    "accession_number",
+    "document_url",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +125,6 @@ def load_watchlist(path: Path) -> list[str]:
             cell = row[0].strip()
             if not cell or cell.startswith("#"):
                 continue
-            # Skip a header row if the first cell looks like a column label
             if not header_checked:
                 header_checked = True
                 if cell.lower() in ("ticker", "symbol", "tickers"):
@@ -127,12 +149,8 @@ def load_ticker_to_cik() -> dict[str, str]:
 
 def fetch_8k_filings(cik: str, since: date) -> list[dict]:
     """
-    Return 8-K filings for *cik* with filing date ≥ *since*.
-
-    The EDGAR submissions JSON lists filings in reverse-chronological order.
-    We stop as soon as we hit a date older than *since* (early-exit for
-    efficiency) — unless SEC returns an older filing before all recent ones,
-    which does not happen in practice for the recent-filings block.
+    Return 8-K filings for *cik* with filing date >= *since*.
+    Output rows use the TradeInt standard schema field names (schema.md).
     """
     url = f"https://data.sec.gov/submissions/CIK{cik}.json"
     data = _get(url)
@@ -152,7 +170,6 @@ def fetch_8k_filings(cik: str, since: date) -> list[dict]:
         except ValueError:
             continue
 
-        # Submissions are newest-first; stop when we go past our window
         if filing_date < since:
             break
 
@@ -164,17 +181,25 @@ def fetch_8k_filings(cik: str, since: date) -> list[dict]:
             f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/"
             f"{acc_clean}/{doc}"
         )
-        rows.append(
-            {
-                "cik": cik,
-                "company_name": company_name,
-                "form": form,
-                "filed_date": date_str,
-                "accession_number": accession,
-                "document_url": doc_url,
-                "category": classify_8k(doc_url, accession),
-            }
-        )
+        rows.append({
+            # Layer 1 — Source Metadata
+            "source":           "SEC_EDGAR",
+            "exchange":         "NYSE/NASDAQ",
+            "jurisdiction":     "US",
+            # Layer 2 — Company Identity
+            "company_name":     company_name,
+            "ticker":           "",        # filled in by caller
+            "source_id":        cik,       # EDGAR-specific identifier: CIK
+            "lei":              "",        # not available from EDGAR; resolve via GLEIF
+            "isin":             "",        # not available from EDGAR; resolve via OpenFIGI
+            "figi":             "",        # not available from EDGAR; resolve via OpenFIGI
+            # Layer 3 — Filing
+            "filing_date":      date_str,
+            "form_type":        form,      # raw EDGAR form name e.g. "8-K"
+            "category":         classify_8k(doc_url, accession),
+            "accession_number": accession,
+            "document_url":     doc_url,
+        })
 
     return rows
 
@@ -182,30 +207,26 @@ def fetch_8k_filings(cik: str, since: date) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Skill: classify 8-K by event type (keyword-rule based)
 # ---------------------------------------------------------------------------
-
-# Each entry: (category_label, [keywords_to_match_in_lowercase_filename])
-# Rules are checked in order; first match wins.
 _CLASSIFICATION_RULES: list[tuple[str, list[str]]] = [
-    ("M&A",              ["merger", "acquisition", "acqui", "takeover", "business combination"]),
-    ("Officer Change",   ["director", "officer", "ceo", "cfo", "coo", "cto", "president",
-                          "resign", "appointment", "elect"]),
-    ("Earnings",         ["result", "earnings", "revenue", "quarter", "fiscal", "financial"]),
-    ("Material Contract",["agreement", "contract", "amendment", "license", "partnership"]),
-    ("Financing",        ["offering", "share", "stock", "debt", "credit", "loan",
-                          "convertible", "note", "bond"]),
-    ("Regulatory",       ["sec ", "regulation", "compliance", "investigation", "lawsuit",
-                          "settlement", "legal"]),
+    ("M&A",               ["merger", "acquisition", "acqui", "takeover", "business combination"]),
+    ("Officer Change",    ["director", "officer", "ceo", "cfo", "coo", "cto", "president",
+                           "resign", "appointment", "elect"]),
+    ("Earnings",          ["result", "earnings", "revenue", "quarter", "fiscal", "financial"]),
+    ("Material Contract", ["agreement", "contract", "amendment", "license", "partnership"]),
+    ("Financing",         ["offering", "share", "stock", "debt", "credit", "loan",
+                           "convertible", "note", "bond"]),
+    ("Regulatory",        ["sec ", "regulation", "compliance", "investigation", "lawsuit",
+                           "settlement", "legal"]),
 ]
 _FALLBACK_CATEGORY = "Other"
 
 
 def classify_8k(document_url: str, accession_number: str) -> str:
     """
-    Return a category label for an 8-K filing.
-
-    Strategy: match keywords against the document filename and accession number.
-    No extra HTTP request is made — purely string-based, zero extra API calls.
-    Accuracy ~60-70%; ambiguous filings fall into '其他 / Other'.
+    Return a standard category label for an 8-K filing.
+    Strategy: keyword match against filename + accession number.
+    No extra HTTP request — purely string-based, zero extra API calls.
+    Accuracy ~60-70%; ambiguous filings fall into 'Other'.
     """
     filename = document_url.split("/")[-1].lower()
     signal = filename + " " + accession_number.lower()
@@ -227,7 +248,7 @@ def append_run_log(
 ) -> None:
     """Append one structured line to logs/run.log (create file/dirs as needed)."""
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(tz=__import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ts = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     line = (
         f"{ts}\t"
         f"tickers={','.join(tickers)}\t"
@@ -326,34 +347,28 @@ def main() -> None:
             print("\nNo 8-K filings found in the look-back window. CSV not written.")
             error_code = "NO_RESULTS"
         else:
-            fieldnames = [
-                "ticker", "cik", "company_name", "form",
-                "filed_date", "accession_number", "category", "document_url",
-            ]
             with open(out_path, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
                 writer.writeheader()
                 writer.writerows(all_rows)
 
             print(f"\n✓ Wrote {len(all_rows)} row(s) to {out_path}")
 
             # ── Preview table ─────────────────────────────────────────────────
-            col_widths = [8, 12, 28, 6, 12, 25]
-            headers_p  = ["ticker", "cik", "company_name", "form", "filed_date", "accession_number"]
+            col_widths = [10, 28, 12, 10, 20]
+            headers_p  = ["source", "company_name", "filing_date", "form_type", "category"]
             sep = "  ".join("-" * w for w in col_widths)
             fmt = "  ".join(f"{{:<{w}}}" for w in col_widths)
-            preview = all_rows[:20]
             print()
             print(fmt.format(*headers_p))
             print(sep)
-            for row in preview:
+            for row in all_rows[:20]:
                 print(fmt.format(
-                    row["ticker"][:col_widths[0]],
-                    row["cik"][:col_widths[1]],
-                    row["company_name"][:col_widths[2]],
-                    row["form"][:col_widths[3]],
-                    row["filed_date"][:col_widths[4]],
-                    row["accession_number"][:col_widths[5]],
+                    row["source"][:col_widths[0]],
+                    row["company_name"][:col_widths[1]],
+                    row["filing_date"][:col_widths[2]],
+                    row["form_type"][:col_widths[3]],
+                    row["category"][:col_widths[4]],
                 ))
             if len(all_rows) > 20:
                 print(f"  … {len(all_rows) - 20} more rows in {out_path}")
