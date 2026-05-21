@@ -1,0 +1,10 @@
+# TradeInt — GLEIF LEI Watchlist
+# Format: one company name per row (column header is 'company')
+# Lines starting with '#' and blank lines are ignored.
+# Use official registered legal names for best match accuracy.
+company
+Apple Inc
+Microsoft Corporation
+DBS Group Holdings Ltd
+HSBC Holdings plc
+Toyota Motor Corporation
