@@ -1,4 +1,4 @@
-name: Weekly 8-K Watchlist Pull
+name: Weekly Watchlist Pull
 
 on:
   schedule:
