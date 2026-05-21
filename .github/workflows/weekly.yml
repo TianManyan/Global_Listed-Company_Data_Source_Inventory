@@ -25,16 +25,56 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      # 4. Run the script — reads watchlist.csv, looks back 7 days
+      # 4a. Run EDGAR script — reads watchlist.csv, looks back 7 days
       - name: Run edgar_8k_pull.py
         run: |
           python edgar_8k_pull.py --days 7 --out filings.csv
 
-      # 5. Upload filings.csv as a downloadable Artifact (kept for 30 days)
+      # 4b. Run GLEIF script — reads gleif_watchlist.csv
+      - name: Run gleif_pull.py
+        run: |
+          python gleif_pull.py --out gleif_results.csv
+
+      # 5. Merge both outputs into a single combined CSV
+      - name: Merge outputs into combined.csv
+        run: |
+          python -c "
+          import csv
+          from pathlib import Path
+          from edgar_8k_pull import FIELDNAMES
+
+          edgar = list(csv.DictReader(open('filings.csv'))) if Path('filings.csv').exists() else []
+          gleif = list(csv.DictReader(open('gleif_results.csv'))) if Path('gleif_results.csv').exists() else []
+          all_rows = edgar + gleif
+
+          with open('combined.csv', 'w', newline='') as f:
+              writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
+              writer.writeheader()
+              writer.writerows(all_rows)
+          print(f'Combined: {len(edgar)} EDGAR + {len(gleif)} GLEIF = {len(all_rows)} total rows')
+          "
+
+      # 6. Upload all three CSVs as downloadable Artifacts (kept for 30 days)
       - name: Upload filings CSV as Artifact
         uses: actions/upload-artifact@v4
         with:
           name: 8k-filings-${{ github.run_id }}
           path: filings.csv
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Upload GLEIF results as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gleif-results-${{ github.run_id }}
+          path: gleif_results.csv
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Upload combined CSV as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: combined-${{ github.run_id }}
+          path: combined.csv
           retention-days: 30
           if-no-files-found: warn
