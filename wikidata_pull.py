@@ -69,10 +69,18 @@ def _sparql(query: str) -> list[dict]:
         timeout=60,   # increased from 30s — Wikidata can be slow (~16B triples)
     )
     _last_request_time = time.monotonic()
+
     if resp.status_code == 429:
-        print("  [WARN] Rate limited (429) — waiting 10s …")
-        time.sleep(10)
+        retry_after = int(resp.headers.get("Retry-After", 10))
+        print(f"  [WARN] Rate limited (429) — waiting {retry_after}s …")
+        time.sleep(retry_after)
         return _sparql(query)   # one retry
+
+    # Wikidata infrastructure errors — don't crash, return empty
+    if resp.status_code in (502, 503, 504):
+        print(f"  [WARN] Wikidata server error ({resp.status_code}) — skipping this query")
+        return []
+
     resp.raise_for_status()
     return resp.json().get("results", {}).get("bindings", [])
 

@@ -31,18 +31,21 @@ jobs:
 
       # 4a. EDGAR 8-K — reads watchlist.csv
       - name: Run edgar_8k_pull.py
+        continue-on-error: true
         run: |
           python edgar_8k_pull.py --tickers AAPL,MSFT,D05,HSBA,7203 \
             --max-filings 20 --out edgar_8k_results.csv
 
       # 4b. EDGAR XBRL — financial data for same tickers
       - name: Run edgar_xbrl_pull.py
+        continue-on-error: true
         run: |
           python edgar_xbrl_pull.py --tickers AAPL,MSFT \
             --out edgar_xbrl_results.csv
 
       # 4c. GLEIF — Level 1 identity + Level 2 parent relationships
       - name: Run gleif_pull.py
+        continue-on-error: true
         run: |
           python gleif_pull.py \
             --companies "Apple Inc,Microsoft Corporation,DBS Group Holdings,HSBC Holdings,Toyota Motor" \
@@ -50,13 +53,16 @@ jobs:
 
       # 4d. OpenFIGI — identifier mapping (ticker → FIGI + ISIN)
       - name: Run openfigi_pull.py
+        continue-on-error: true
         run: |
           python openfigi_pull.py \
             --tickers AAPL,MSFT,SP:D05,LN:HSBA \
             --env --out openfigi_results.csv
 
       # 4e. Wikidata — founded_year, website, ticker enrichment
+      #     continue-on-error: Wikidata occasionally returns 502/503 (infrastructure issue)
       - name: Run wikidata_pull.py
+        continue-on-error: true
         run: |
           python wikidata_pull.py \
             --companies "Apple Inc,Microsoft Corporation,DBS Group,HSBC Holdings,Toyota Motor" \
