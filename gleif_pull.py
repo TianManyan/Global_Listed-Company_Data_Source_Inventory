@@ -1,8 +1,17 @@
 """
-gleif_pull.py — Query the GLEIF LEI Registry for a list of company names.
+gleif_pull.py v2.0 — Query the GLEIF LEI Registry for a list of company names.
 
-Outputs follow the TradeInt cross-source standard schema (see schema.md).
-Results can be merged directly with edgar_8k_pull.py output — same columns.
+Output follows TradeInt standard schema v2.1 (49 fields).
+Compatible with merge_v2.py directly.
+
+New in v2.0 vs v1.0
+--------------------
+- Populates all schema v2.1 Layer 3 fields available from GLEIF:
+    legal_form, country_of_incorporation, registered_address, hq_address,
+    parent_company_name, parent_lei, is_listed_subsidiary
+- Populates all Layer 5 LEI trust fields:
+    lei_status, lei_last_updated, lei_next_renewal_date
+- Now includes INACTIVE entities (marked in lei_status); v1.0 silently dropped them
 
 Dependencies: requests  (pip install requests)
 Rate limit:   No hard limit published; fair-use basis.
@@ -18,9 +27,7 @@ Usage examples
     python gleif_pull.py --companies "Apple Inc,Microsoft Corporation"
 
 # Limit results per company, custom output path
-    python gleif_pull.py --max-results 3 --out results/gleif_2026-05-21.csv
-
-Run log is appended to logs/run.log automatically.
+    python gleif_pull.py --max-results 3 --out results/gleif_2026-05-25.csv
 """
 
 import argparse
@@ -52,28 +59,9 @@ MIN_INTERVAL = 0.5   # seconds between requests (fair-use, no published limit)
 _last_request_time: float = 0.0
 
 # ---------------------------------------------------------------------------
-# Standard output fields — matches TradeInt cross-source schema (schema.md)
-# Layer 1: Source Metadata | Layer 2: Company Identity | Layer 3: Filing
+# Schema v2.1 output fields — imported from schema.py (single source of truth)
 # ---------------------------------------------------------------------------
-FIELDNAMES = [
-    # Layer 1 — Source Metadata
-    "source",
-    "exchange",
-    "jurisdiction",
-    # Layer 2 — Company Identity
-    "company_name",
-    "ticker",
-    "source_id",
-    "lei",
-    "isin",
-    "figi",
-    # Layer 3 — Filing (not applicable for GLEIF; fields left empty)
-    "filing_date",
-    "form_type",
-    "category",
-    "accession_number",
-    "document_url",
-]
+from schema import FIELDNAMES  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -116,12 +104,50 @@ def load_watchlist(path: Path) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# GLEIF query
+# GLEIF Level 2 — parent relationship lookup
 # ---------------------------------------------------------------------------
+def _fetch_parent(lei: str) -> tuple[str, str, str]:
+    """
+    Look up the ultimate parent of *lei* via GLEIF Level 2 API.
+
+    Returns (parent_company_name, parent_lei, is_listed_subsidiary).
+    Returns ("", "", "") when:
+      - Entity has no parent (independent company)
+      - Parent has no LEI (reporting exception)
+      - API returns 404 or any error
+
+    Coverage: ~93% of LEI-registered entities have verified parent data
+    (GLEIF Q4 2025 Business Report). When parent itself has no LEI, the
+    relationship is filed as a reporting exception and this function
+    returns empty strings.
+    """
+    url = f"{GLEIF_API_BASE}/lei-records/{lei}/ultimate-parent"
+    try:
+        data   = _get(url)
+        parent = data.get("data", {})
+        if not parent:
+            return "", "", ""
+        attrs       = parent.get("attributes", {})
+        entity      = attrs.get("entity", {})
+        parent_lei  = parent.get("id", "")
+        parent_name = entity.get("legalName", {}).get("name", "")
+        # is_listed_subsidiary: true if we found a parent record
+        is_subsidiary = "True" if parent_lei else ""
+        return parent_name, parent_lei, is_subsidiary
+    except Exception:
+        # 404 = no parent / reporting exception; other errors = treat as unknown
+        return "", "", ""
+
+
+
 def fetch_lei_records(company_name: str, max_results: int) -> list[dict]:
     """
     Search GLEIF for *company_name* and return up to *max_results* rows
-    mapped to the TradeInt standard schema.
+    mapped to the TradeInt standard schema v2.1.
+
+    Unlike v1.0, this version:
+    - Includes INACTIVE/ANNULLED entities (marked in lei_status)
+    - Populates all available Layer 3 and Layer 5 fields
     """
     url = f"{GLEIF_API_BASE}/lei-records"
     params = {
@@ -133,31 +159,89 @@ def fetch_lei_records(company_name: str, max_results: int) -> list[dict]:
 
     rows: list[dict] = []
     for record in records:
-        attrs      = record.get("attributes", {})
-        entity     = attrs.get("entity", {})
-        reg        = attrs.get("registration", {})
+        attrs  = record.get("attributes", {})
+        entity = attrs.get("entity", {})
+        reg    = attrs.get("registration", {})
+
         lei        = attrs.get("lei", "")
         legal_name = entity.get("legalName", {}).get("name", "")
-        country    = entity.get("legalAddress", {}).get("country", "")
-        status     = entity.get("status", "")
+        status     = entity.get("status", "")  # ACTIVE / INACTIVE / ANNULLED
 
-        # Only include active entities
-        if status != "ACTIVE":
-            continue
+        # Addresses
+        legal_addr = entity.get("legalAddress", {})
+        hq_addr    = entity.get("headquartersAddress", {})
+
+        def _format_address(a: dict) -> str:
+            parts = [
+                " ".join(a.get("addressLines", [])),
+                a.get("city", ""),
+                a.get("region", ""),
+                a.get("postalCode", ""),
+                a.get("country", ""),
+            ]
+            return ", ".join(p for p in parts if p)
+
+        registered_address = _format_address(legal_addr)
+        hq_address         = _format_address(hq_addr)
+        country            = legal_addr.get("country", "")
+
+        # Legal form (ELF code → plain text name)
+        legal_form_obj = entity.get("legalForm", {})
+        legal_form     = legal_form_obj.get("other", "") or legal_form_obj.get("id", "")
+
+        # Parent / ownership via GLEIF Level 2
+        parent_name, parent_lei_val, is_subsidiary = _fetch_parent(lei)
+
+        # Trust signals
+        lei_status          = status
+        lei_last_updated    = reg.get("lastUpdateDate", "")[:10]  # trim to YYYY-MM-DD
+        lei_next_renewal    = reg.get("nextRenewalDate", "")[:10]
 
         rows.append({
-            # Layer 1 — Source Metadata
-            "source":           "GLEIF",
-            "exchange":         "",      # GLEIF covers legal entities, not exchange listings
-            "jurisdiction":     country, # ISO 2-letter country code
-            # Layer 2 — Company Identity
-            "company_name":     legal_name,
-            "ticker":           "",      # not available from GLEIF
-            "source_id":        lei,     # GLEIF-specific identifier: LEI
-            "lei":              lei,     # filled directly from GLEIF
-            "isin":             "",      # not available from GLEIF
-            "figi":             "",      # not available from GLEIF
-            # Layer 3 — Filing (not applicable for GLEIF)
+            # Layer 1
+            "source":      "GLEIF",
+            "exchange":    "",   # GLEIF covers legal entities, not exchange listings
+            "jurisdiction": country,
+            # Layer 2
+            "company_name": legal_name,
+            "ticker":       "",
+            "source_id":    lei,
+            "lei":          lei,
+            "isin":         "",
+            "figi":         "",
+            # Layer 3
+            "company_name_local":             "",
+            "company_description":            "",
+            "founded_year":                   "",
+            "industry_sector":                "",
+            "industry_code":                  "",
+            "industry_classification_scheme": "",
+            "country_of_incorporation":       country,
+            "registered_address":             registered_address,
+            "hq_address":                     hq_address if hq_address != registered_address else "",
+            "employee_count":                 "",
+            "employee_count_date":            "",
+            "website":                        "",
+            "primary_products_services":      "",
+            "parent_company_name":            parent_name,
+            "parent_lei":                     parent_lei_val,
+            "is_listed_subsidiary":           is_subsidiary,
+            "legal_form":                     legal_form,
+            # Layer 4 — not available from GLEIF
+            "market_cap_usd": "", "market_cap_date": "",
+            "revenue_usd": "", "revenue_period": "",
+            "net_income_usd": "", "net_income_period": "",
+            "credit_rating": "", "credit_rating_agency": "",
+            "esg_report_url": "", "cdp_rating": "", "cdp_disclosure_year": "",
+            # Layer 5
+            "lei_status":             lei_status,
+            "lei_last_updated":       lei_last_updated,
+            "lei_next_renewal_date":  lei_next_renewal,
+            "exchange_verified":      "",
+            "latest_filing_date":     "",
+            "filing_frequency_12m":   "",
+            "data_completeness_score": "",
+            # Filing — not applicable for GLEIF
             "filing_date":      "",
             "form_type":        "",
             "category":         "",
@@ -270,8 +354,8 @@ def main() -> None:
             print(f"\n✓ Wrote {len(all_rows)} row(s) to {out_path}")
 
             # ── Preview ───────────────────────────────────────────────────────
-            col_widths = [6, 12, 28, 22]
-            headers_p  = ["source", "jurisdiction", "company_name", "lei"]
+            col_widths = [6, 8, 28, 22, 8, 12]
+            headers_p  = ["source", "jurisd.", "company_name", "lei", "status", "renewal"]
             sep = "  ".join("-" * w for w in col_widths)
             fmt = "  ".join(f"{{:<{w}}}" for w in col_widths)
             print()
@@ -283,6 +367,8 @@ def main() -> None:
                     row["jurisdiction"][:col_widths[1]],
                     row["company_name"][:col_widths[2]],
                     row["lei"][:col_widths[3]],
+                    row["lei_status"][:col_widths[4]],
+                    row["lei_next_renewal_date"][:col_widths[5]],
                 ))
             if len(all_rows) > 20:
                 print(f"  … {len(all_rows) - 20} more rows in {out_path}")

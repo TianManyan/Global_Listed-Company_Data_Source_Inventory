@@ -1,4 +1,4 @@
-name: Weekly Watchlist Pull
+name: Weekly Company Data Pull
 
 on:
   schedule:
@@ -7,11 +7,15 @@ on:
   workflow_dispatch:  # Allow manual trigger from GitHub UI
 
 jobs:
-  pull-8k-filings:
+  pull-company-data:
     runs-on: ubuntu-latest
 
+    env:
+      EDINET_API_KEY: ${{ secrets.EDINET_API_KEY }}
+      OPENFIGI_API_KEY: ${{ secrets.OPENFIGI_API_KEY }}
+
     steps:
-      # 1. Check out the repo so the runner has access to all files
+      # 1. Check out the repo
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -21,60 +25,78 @@ jobs:
         with:
           python-version: '3.11'
 
-      # 3. Install the only non-stdlib dependency
+      # 3. Install dependencies
       - name: Install dependencies
-        run: pip install requests
+        run: pip install requests python-dotenv
 
-      # 4a. Run EDGAR script — reads watchlist.csv, looks back 7 days
+      # 4a. EDGAR 8-K — reads watchlist.csv
       - name: Run edgar_8k_pull.py
         run: |
-          python edgar_8k_pull.py --days 7 --out filings.csv
+          python edgar_8k_pull.py --tickers AAPL,MSFT,D05,HSBA,7203 \
+            --max-filings 20 --out edgar_8k_results.csv
 
-      # 4b. Run GLEIF script — reads gleif_watchlist.csv
+      # 4b. EDGAR XBRL — financial data for same tickers
+      - name: Run edgar_xbrl_pull.py
+        run: |
+          python edgar_xbrl_pull.py --tickers AAPL,MSFT \
+            --out edgar_xbrl_results.csv
+
+      # 4c. GLEIF — Level 1 identity + Level 2 parent relationships
       - name: Run gleif_pull.py
         run: |
-          python gleif_pull.py --out gleif_results.csv
+          python gleif_pull.py \
+            --companies "Apple Inc,Microsoft Corporation,DBS Group Holdings,HSBC Holdings,Toyota Motor" \
+            --out gleif_results.csv
 
-      # 5. Merge both outputs into a single combined CSV
-      - name: Merge outputs into combined.csv
+      # 4d. OpenFIGI — identifier mapping (ticker → FIGI + ISIN)
+      - name: Run openfigi_pull.py
         run: |
-          python -c "
-          import csv
-          from pathlib import Path
-          from edgar_8k_pull import FIELDNAMES
+          python openfigi_pull.py \
+            --tickers AAPL,MSFT,SP:D05,LN:HSBA \
+            --env --out openfigi_results.csv
 
-          edgar = list(csv.DictReader(open('filings.csv'))) if Path('filings.csv').exists() else []
-          gleif = list(csv.DictReader(open('gleif_results.csv'))) if Path('gleif_results.csv').exists() else []
-          all_rows = edgar + gleif
+      # 4e. Wikidata — founded_year, website, ticker enrichment
+      - name: Run wikidata_pull.py
+        run: |
+          python wikidata_pull.py \
+            --companies "Apple Inc,Microsoft Corporation,DBS Group,HSBC Holdings,Toyota Motor" \
+            --out wikidata_results.csv
 
-          with open('combined.csv', 'w', newline='') as f:
-              writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
-              writer.writeheader()
-              writer.writerows(all_rows)
-          print(f'Combined: {len(edgar)} EDGAR + {len(gleif)} GLEIF = {len(all_rows)} total rows')
-          "
+      # 5. Merge all outputs into entity-centric profiles + filing table
+      - name: Run merge_v2.py
+        run: |
+          python merge_v2.py \
+            --inputs edgar_8k_results.csv edgar_xbrl_results.csv \
+                     gleif_results.csv openfigi_results.csv wikidata_results.csv \
+            --profiles merged_profiles.csv \
+            --filings merged_filings.csv
 
-      # 6. Upload all three CSVs as downloadable Artifacts (kept for 30 days)
-      - name: Upload filings CSV as Artifact
+      # 6. Upload all outputs as downloadable Artifacts (kept 30 days)
+      - name: Upload merged profiles
         uses: actions/upload-artifact@v4
         with:
-          name: 8k-filings-${{ github.run_id }}
-          path: filings.csv
+          name: merged-profiles-${{ github.run_id }}
+          path: merged_profiles.csv
           retention-days: 30
           if-no-files-found: warn
 
-      - name: Upload GLEIF results as Artifact
+      - name: Upload merged filings
         uses: actions/upload-artifact@v4
         with:
-          name: gleif-results-${{ github.run_id }}
-          path: gleif_results.csv
+          name: merged-filings-${{ github.run_id }}
+          path: merged_filings.csv
           retention-days: 30
           if-no-files-found: warn
 
-      - name: Upload combined CSV as Artifact
+      - name: Upload individual source CSVs
         uses: actions/upload-artifact@v4
         with:
-          name: combined-${{ github.run_id }}
-          path: combined.csv
+          name: source-csvs-${{ github.run_id }}
+          path: |
+            edgar_8k_results.csv
+            edgar_xbrl_results.csv
+            gleif_results.csv
+            openfigi_results.csv
+            wikidata_results.csv
           retention-days: 30
           if-no-files-found: warn
