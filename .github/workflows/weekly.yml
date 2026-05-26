@@ -45,16 +45,14 @@ jobs:
             --out edgar_xbrl_results.csv
 
       # 4c. EODHD — primary source for Layer 3 profile + Layer 4 global financials
-      #     Fills: cusip, company_description, ipo_date, fiscal_year_end,
-      #            phone, officers, cross_listings, is_delisted,
-      #            market_cap_usd, revenue_usd (non-US), hq_address, website
-      #     Ticker format: SYMBOL.EXCHANGE (e.g. AAPL.US, D05.SG, HSBA.LSE)
+      #     Demo key limitation: only AAPL.US accessible without paid key.
+      #     Replace --apikey demo with --env once paid key is added to secrets.
       - name: Run eodhd_pull.py
         continue-on-error: true
         run: |
           python eodhd_pull.py \
-            --tickers AAPL.US,MSFT.US,D05.SG,HSBA.LSE,7203.TSE \
-            --env --out eodhd_results.csv
+            --tickers AAPL.US \
+            --apikey demo --out eodhd_results.csv
 
       # 4d. GLEIF — LEI identity + Level 2 parent relationships + trust signals
       - name: Run gleif_pull.py
