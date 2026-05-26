@@ -96,6 +96,12 @@ def _get(ticker_exchange: str, api_key: str) -> dict:
     resp = requests.get(url, params=params, timeout=20)
     _last_request_time = time.monotonic()
 
+    # v1.1 returns 403 for demo key in some environments — fall back to legacy endpoint
+    if resp.status_code == 403 and api_key == "demo":
+        legacy_url = f"https://eodhd.com/api/fundamentals/{ticker_exchange}"
+        resp = requests.get(legacy_url, params=params, timeout=20)
+        _last_request_time = time.monotonic()
+
     if resp.status_code == 403:
         raise PermissionError(
             f"HTTP 403 — API key may lack access to '{ticker_exchange}'. "
