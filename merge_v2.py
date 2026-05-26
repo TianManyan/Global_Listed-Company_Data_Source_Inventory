@@ -104,33 +104,10 @@ LATEST_PAIRS: list[tuple[str, str]] = [
 
 
 # ---------------------------------------------------------------------------
-# completeness_score definition
-# Fields that are structurally absent for some companies are excluded (B-class)
 # ---------------------------------------------------------------------------
-
-# weight 1.0 — required + high-value fields
-SCORE_WEIGHT_1: list[str] = [
-    "source", "exchange", "jurisdiction",
-    "company_name", "ticker", "source_id",
-    "lei", "isin",
-    "industry_sector", "country_of_incorporation",
-    "lei_status", "exchange_verified",
-    "latest_filing_date", "legal_form",
-    "filing_date", "form_type", "category",
-]
-
-# weight 0.5 — medium-value optional fields
-SCORE_WEIGHT_HALF: list[str] = [
-    "company_description", "founded_year",
-    "revenue_usd", "market_cap_usd",
-    "employee_count", "website",
-]
-
-# B-class fields — not in denominator (credit_rating, cdp_rating, esg_report_url,
-# parent_*, is_listed_subsidiary, employee_count in some markets, etc.)
-# These fields are still stored but do not affect completeness_score.
-
-SCORE_MAX = len(SCORE_WEIGHT_1) * 1.0 + len(SCORE_WEIGHT_HALF) * 0.5  # = 20.0
+# completeness_score — weights imported from schema.py (single source of truth)
+# ---------------------------------------------------------------------------
+from schema import SCORE_WEIGHT_1, SCORE_WEIGHT_HALF, SCORE_MAX  # noqa: E402
 
 
 def compute_completeness(profile: dict) -> float:
