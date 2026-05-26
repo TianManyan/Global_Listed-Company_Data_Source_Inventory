@@ -233,7 +233,15 @@ This document defines the standard field names and types used across all TradeIn
 | `filing_frequency_12m` | < 2 | Unusually low filing activity |
 | `data_completeness_score` | < 0.5 | Display warning in UI |
 
-**Note on `data_completeness_score`:** Computed by `merge.py`. Weighted fields: all Layer 2 fields (weight 1.0 each), `industry_sector`, `country_of_incorporation`, `lei_status`, `exchange_verified`, `latest_filing_date` (weight 1.0 each), `company_description`, `revenue_usd`, `market_cap_usd` (weight 0.5 each). Total denominator = 20.0.
+**Note on `data_completeness_score`:** Computed by `merge.py` at merge time. Not pulled from any external API. Score = weighted_filled / 20.0, rounded to 3 decimal places.
+
+**Weight 1.0 fields (17 fields × 1.0 = 17 pts):**
+`source`, `exchange`, `jurisdiction`, `company_name`, `ticker`, `source_id`, `lei`, `isin`, `industry_sector`, `country_of_incorporation`, `lei_status`, `exchange_verified`, `latest_filing_date`, `legal_form`, `filing_date`, `form_type`, `category`
+
+**Weight 0.5 fields (6 fields × 0.5 = 3 pts):**
+`company_description`, `founded_year`, `revenue_usd`, `market_cap_usd`, `employee_count`, `website`
+
+**Total denominator = 20.0.** Fields not listed above (e.g. `credit_rating`, `cdp_rating`, `officers`, `ipo_date`, `cusip`, `parent_*`) are B-class structural gaps — structurally absent for some companies and excluded from the denominator to avoid penalising records that are genuinely complete for their company type. The authoritative definition lives in `schema.py` (`SCORE_WEIGHT_1`, `SCORE_WEIGHT_HALF`, `SCORE_MAX`). If these two sources ever conflict, `schema.py` takes precedence.
 
 ---
 
