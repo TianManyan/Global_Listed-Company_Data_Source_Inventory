@@ -13,7 +13,7 @@ jobs:
     env:
       EDINET_API_KEY: ${{ secrets.EDINET_API_KEY }}
       OPENFIGI_API_KEY: ${{ secrets.OPENFIGI_API_KEY }}
-      EODHD_API_KEY: ${{ secrets.EODHD_API_KEY }}
+      EODHD_API_KEY: ${{ secrets.EODHD_API_KEY_DEMO }}
 
     steps:
       # 1. Check out the repo
