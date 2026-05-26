@@ -53,8 +53,15 @@ jobs:
         continue-on-error: true
         run: |
           python eodhd_pull.py \
-            --tickers AAPL.US,MSFT.US,D05.SG,HSBA.LSE,7203.TSE \
-            --env --out eodhd_results.csv
+            --tickers AAPL.US \
+            --apikey demo --out eodhd_results.csv
+            
+      #- name: Run eodhd_pull.py
+      #  continue-on-error: true
+      #  run: |
+      #    python eodhd_pull.py \
+      #      --tickers AAPL.US,MSFT.US,D05.SG,HSBA.LSE,7203.TSE \
+      #      --env --out eodhd_results.csv
 
       # 4d. GLEIF — LEI identity + Level 2 parent relationships + trust signals
       - name: Run gleif_pull.py
