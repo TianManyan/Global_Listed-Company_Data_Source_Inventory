@@ -13,6 +13,7 @@ jobs:
     env:
       EDINET_API_KEY: ${{ secrets.EDINET_API_KEY }}
       OPENFIGI_API_KEY: ${{ secrets.OPENFIGI_API_KEY }}
+      EODHD_API_KEY: ${{ secrets.EODHD_API_KEY }}
 
     steps:
       # 1. Check out the repo
@@ -29,21 +30,33 @@ jobs:
       - name: Install dependencies
         run: pip install requests python-dotenv
 
-      # 4a. EDGAR 8-K — reads watchlist.csv
+      # 4a. EDGAR 8-K — filing events
       - name: Run edgar_8k_pull.py
         continue-on-error: true
         run: |
           python edgar_8k_pull.py --tickers AAPL,MSFT,D05,HSBA,7203 \
             --max-filings 20 --out edgar_8k_results.csv
 
-      # 4b. EDGAR XBRL — financial data for same tickers
+      # 4b. EDGAR XBRL — US financial data (revenue, net income, employees)
       - name: Run edgar_xbrl_pull.py
         continue-on-error: true
         run: |
           python edgar_xbrl_pull.py --tickers AAPL,MSFT \
             --out edgar_xbrl_results.csv
 
-      # 4c. GLEIF — Level 1 identity + Level 2 parent relationships
+      # 4c. EODHD — primary source for Layer 3 profile + Layer 4 global financials
+      #     Fills: cusip, company_description, ipo_date, fiscal_year_end,
+      #            phone, officers, cross_listings, is_delisted,
+      #            market_cap_usd, revenue_usd (non-US), hq_address, website
+      #     Ticker format: SYMBOL.EXCHANGE (e.g. AAPL.US, D05.SG, HSBA.LSE)
+      - name: Run eodhd_pull.py
+        continue-on-error: true
+        run: |
+          python eodhd_pull.py \
+            --tickers AAPL.US,MSFT.US,D05.SG,HSBA.LSE,7203.TSE \
+            --env --out eodhd_results.csv
+
+      # 4d. GLEIF — LEI identity + Level 2 parent relationships + trust signals
       - name: Run gleif_pull.py
         continue-on-error: true
         run: |
@@ -51,7 +64,7 @@ jobs:
             --companies "Apple Inc,Microsoft Corporation,DBS Group Holdings,HSBC Holdings,Toyota Motor" \
             --out gleif_results.csv
 
-      # 4d. OpenFIGI — identifier mapping (ticker → FIGI + ISIN)
+      # 4e. OpenFIGI — ticker → FIGI + ISIN mapping
       - name: Run openfigi_pull.py
         continue-on-error: true
         run: |
@@ -59,8 +72,10 @@ jobs:
             --tickers AAPL,MSFT,SP:D05,LN:HSBA \
             --env --out openfigi_results.csv
 
-      # 4e. Wikidata — founded_year, website, ticker enrichment
-      #     continue-on-error: Wikidata occasionally returns 502/503 (infrastructure issue)
+      # 4f. Wikidata — auxiliary source for founded_year only
+      #     Note: website and ticker now come from EODHD (higher quality).
+      #     Wikidata retained because it is the only free source for founded_year.
+      #     continue-on-error: Wikidata occasionally returns 502/503.
       - name: Run wikidata_pull.py
         continue-on-error: true
         run: |
@@ -73,6 +88,7 @@ jobs:
         run: |
           python merge_v2.py \
             --inputs edgar_8k_results.csv edgar_xbrl_results.csv \
+                     eodhd_results.csv \
                      gleif_results.csv openfigi_results.csv wikidata_results.csv \
             --profiles merged_profiles.csv \
             --filings merged_filings.csv
