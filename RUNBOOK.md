@@ -1,7 +1,8 @@
 # Runbook — Global Listed-Company Data Sources
 
 **Project:** TradeInt Listed-Company Data Sources & APIs Inventory
-**Last updated:** May 2026
+**Last updated:** 2026-05-26
+**Schema version:** v2.2 (56 fields)
 **Questions?** Ping the owner listed in Section 1, or paste any error message into Claude and ask for help.
 
 ---
@@ -13,9 +14,10 @@
 This runbook is an operational guide for accessing TradeInt's inventory of global listed-company data sources. It covers:
 
 - **Tier 1 — Free / public API sources** (SEC EDGAR, GLEIF, Wikidata, OpenFIGI): full operational detail — setup, authentication, sample queries, refresh cadence, and known issues
-- **Tier 2 — Commercial / no-public-API sources** (SGX, LSE RNS, Euronext, ASX, JPX TDnet, Bursa Malaysia, NSE, BSE, LSEG, Bloomberg, S&P Capital IQ): one-paragraph summary per source covering what it is, how to get access, and cost range
+- **Tier 2 — Commercial sources** (EODHD): full operational detail — setup, authentication, field mapping, and known limitations
+- **Tier 3 — No-public-API sources** (SGX, LSE RNS, Euronext, ASX, JPX TDnet, Bursa Malaysia, NSE, BSE, LSEG, Bloomberg, S&P Capital IQ): one-paragraph summary per source covering what it is, how to get access, and cost range
 
-For API endpoint details and cross-source field mapping, see `api.md`. For source architecture and access tiers, see `arch.md`.
+For API endpoint details and cross-source field mapping, see `api.md`. For field coverage by source, see `field_coverage_matrix.md`.
 
 ### Owner
 
@@ -55,8 +57,8 @@ SEC EDGAR, GLEIF, and Wikidata require no API keys. For other sources, create a 
 ```bash
 # .env — never commit this file to GitHub
 OPENFIGI_API_KEY=your_key_here
-OPENCORPORATES_API_KEY=your_key_here
 EDINET_API_KEY=your_key_here
+EODHD_API_KEY=your_key_here        # demo key: 6a1422a45b7334.07835825 (AAPL.US only)
 ```
 
 The `.gitignore` already excludes `.env` from being committed. Load keys in Python with:
@@ -65,27 +67,28 @@ The `.gitignore` already excludes `.env` from being committed. Load keys in Pyth
 import os
 from dotenv import load_dotenv
 load_dotenv()
-key = os.getenv("OPENFIGI_API_KEY")
+key = os.getenv("EODHD_API_KEY")
 ```
 
 ### File structure
 
 ```
 EDGAR-watchlist/
-├── edgar_8k_pull.py              # SEC EDGAR 8-K pull script
-├── gleif_pull.py                 # GLEIF LEI registry pull script
-├── watchlist.csv                 # Ticker list for EDGAR automated runs
-├── gleif_watchlist.csv           # Company name list for GLEIF queries
-├── schema.md                     # TradeInt cross-source standard schema (14 fields)
-├── docs/
-│   ├── prd.md                    # Project Spec
-│   ├── arch.md                   # Architecture overview
-│   ├── api.md                    # API reference
-│   ├── changelog.md              # Iteration log
-│   └── runbook.md                # This file
+├── schema.py                     # ★ Single source of truth — 56 field definitions
+├── edgar_8k_pull.py              # SEC EDGAR 8-K filing events
+├── edgar_xbrl_pull.py            # SEC EDGAR XBRL financial data (US only)
+├── eodhd_pull.py                 # EODHD Fundamentals API (global, paid)
+├── gleif_pull.py                 # GLEIF LEI registry + Level 2 parent data
+├── openfigi_pull.py              # OpenFIGI ticker → FIGI/ISIN mapping
+├── wikidata_pull.py              # Wikidata — founded_year, website (auxiliary)
+├── merge_v2.py                   # Entity-centric merge — all sources → profiles
+├── schema_v2_2.md                # Human-readable schema documentation
+├── field_coverage_matrix.md      # 21 sources × 56 fields coverage matrix
+├── api.md                        # API endpoint reference
+├── sources_6questions_v5.md      # 18 sources × 6 questions documentation
 ├── .env                          # API keys — never commit
 ├── .gitignore
-└── .github/workflows/weekly.yml  # GitHub Actions automation
+└── .github/workflows/weekly.yml  # GitHub Actions — runs every Monday 09:00 UTC
 ```
 
 ---
@@ -94,174 +97,199 @@ EDGAR-watchlist/
 
 ### SEC EDGAR (United States)
 
-**What it covers:** All US-listed companies and Exchange Act reporting entities. 8-K (material events), 10-K (annual reports), 10-Q (quarterly reports), and all other SEC form types.
+**What it covers:** All US-listed companies. Two scripts:
+- `edgar_8k_pull.py` — 8-K filing events (material announcements)
+- `edgar_xbrl_pull.py` — XBRL financial data (revenue, net income, employee count)
 
 **Run the 8-K pull script:**
 
 ```bash
-# Fetch recent 8-K filings for specific tickers
 python edgar_8k_pull.py --tickers AAPL,MSFT,TSLA
-
-# Limit rows per ticker
 python edgar_8k_pull.py --tickers AAPL,MSFT --max-filings 10
-
-# Custom output path
-python edgar_8k_pull.py --tickers AAPL --out results/2026-05-20.csv
+python edgar_8k_pull.py --tickers AAPL --out results/edgar_8k_2026-05-26.csv
 ```
 
-**Run via GitHub Actions (automated, recommended):**
+**Run the XBRL financial data script:**
 
-1. Go to https://github.com/TianManyan/EDGAR-watchlist/actions
-2. Click **Weekly 8-K Watchlist Pull** → **Run workflow**
-3. Download the CSV artifact when complete (retained 30 days)
+```bash
+python edgar_xbrl_pull.py --tickers AAPL,MSFT
+python edgar_xbrl_pull.py --tickers AAPL --out results/edgar_xbrl_2026-05-26.csv
+```
 
-**Sample output:**
+**Fields populated by EDGAR scripts:**
+
+| Script | Fields populated |
+|---|---|
+| `edgar_8k_pull.py` | source, exchange, jurisdiction, company_name, ticker, source_id, industry_sector, industry_code, industry_classification_scheme, country_of_incorporation, exchange_verified, latest_filing_date, filing_frequency_12m, filing_date, form_type, category, accession_number, document_url |
+| `edgar_xbrl_pull.py` | source, company_name, ticker, source_id, revenue_usd, revenue_period, net_income_usd, net_income_period, employee_count, employee_count_date |
+
+**Sample output (8-K):**
 
 ```
 Loading ticker → CIK map from SEC …
-  Fetching 8-Ks for AAPL (CIK 0000320193) … 0 filing(s)
-  Fetching 8-Ks for MSFT (CIK 0000789019) … 1 filing(s)
+  Fetching 8-Ks for AAPL (CIK 0000320193) … 20 filing(s)
+  Fetching 8-Ks for MSFT (CIK 0000789019) … 20 filing(s)
 
-✓ Wrote 1 row(s) to filings.csv
+✓ Wrote 40 rows → edgar_8k_results.csv
 
-ticker    cik           company_name     form    filed_date
---------  ------------  ---------------  ------  ----------
-MSFT      0000789019    MICROSOFT CORP   8-K     2026-05-14
+ticker    source_id     company_name    category    filing_date   accession_number
+--------  ------------  --------------  ----------  ------------  ----------------
+AAPL      0000320193    Apple Inc.      Earnings    2026-04-30    0000320193-26-...
 ```
 
-**Refresh cadence:** Real-time on filing submission. Filings are visible via the API within minutes of submission.
-
-**Rate limit:** 10 req/s (SEC hard limit). Script enforces 110 ms interval. Empirical (2026-05-19): mean latency 386.7 ms, 0 × HTTP 429.
+**Refresh cadence:** Real-time — filings visible within minutes of submission.
+**Rate limit:** 10 req/s (SEC hard limit). Script enforces 110 ms interval.
 
 ---
 
 ### GLEIF LEI Registry (Global)
 
-**What it covers:** Legal Entity Identifier (LEI) records for legal entities worldwide. Useful for cross-border identity resolution, finding parent-subsidiary relationships, and populating the `lei` field in the TradeInt standard schema. Covers US, SG, GB, JP, and 200+ other jurisdictions.
+**What it covers:** Legal Entity Identifier records worldwide. `gleif_pull.py` queries both Level 1 (entity data) and Level 2 (parent-subsidiary relationships).
 
-**Run the GLEIF pull script:**
+**Fields populated:**
+
+Layer 2: `lei`, `source_id`
+Layer 3: `company_name_local` (partial), `country_of_incorporation`, `registered_address`, `hq_address` (if different), `parent_company_name`, `parent_lei`, `is_listed_subsidiary`, `legal_form`
+Layer 5: `lei_status`, `lei_last_updated`, `lei_next_renewal_date`
+
+**Run the script:**
 
 ```bash
-# Query companies from gleif_watchlist.csv (default)
-python gleif_pull.py
-
-# Query specific companies from the command line
-python gleif_pull.py --companies "Apple Inc,HSBC Holdings plc"
-
-# Limit results per company, custom output path
-python gleif_pull.py --max-results 3 --out results/gleif_2026-05-21.csv
-```
-
-**Update gleif_watchlist.csv:**
-
-Open `gleif_watchlist.csv` and add or remove company names. Use official registered legal names for best match accuracy.
-
-```csv
-company
-Apple Inc
-Microsoft Corporation
-DBS Group Holdings Ltd
+python gleif_pull.py --companies "Apple Inc,Microsoft Corporation,DBS Group Holdings"
+python gleif_pull.py --companies "Apple Inc" --max-results 3 --out gleif_results.csv
 ```
 
 **Sample output:**
 
 ```
-Companies from gleif_watchlist.csv: Apple Inc, Microsoft Corporation, ...
+  Querying 'Apple Inc' … lei=HWUPKR0MPOU8FGXBT394  status=ACTIVE  renewal=2027-03-08
+  Querying 'Microsoft Corporation' … lei=INR2EJN1ERAN0W5ZP974  status=ACTIVE  renewal=2027-05-04
 
-  Querying GLEIF for 'Apple Inc' … 1 record(s)
-  Querying GLEIF for 'Microsoft Corporation' … 1 record(s)
-
-✓ Wrote 5 row(s) to gleif_results.csv
-
-source  jurisdiction  company_name               lei
-------  ------------  -------------------------  ----------------------
-GLEIF   US            Apple Inc.                 HWUPKR0MPOU8FGXBT394
-GLEIF   US            MICROSOFT CORPORATION      INR2EJN1ERAN0W5ZP974
-GLEIF   SG            DBS GROUP HOLDINGS LTD     5493007FKT78NKPM5V55
+✓ Wrote 2 row(s) → gleif_results.csv
 ```
 
-**Merging with EDGAR output:**
+**Tips for better matching:**
+- Use the official registered legal name (e.g. `DBS Group Holdings Ltd`, not `DBS`)
+- For subsidiaries, GLEIF Level 2 only returns parent data if the parent also has a registered LEI
 
-Both scripts output the same 14-column standard schema. To merge:
-
-```bash
-python -c "
-import csv
-from edgar_8k_pull import FIELDNAMES
-
-edgar = list(csv.DictReader(open('filings.csv')))
-gleif = list(csv.DictReader(open('gleif_results.csv')))
-all_rows = edgar + gleif
-
-with open('combined.csv', 'w', newline='') as f:
-    writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
-    writer.writeheader()
-    writer.writerows(all_rows)
-print(f'{len(edgar)} EDGAR + {len(gleif)} GLEIF = {len(all_rows)} rows → combined.csv')
-"
-```
-
-**Refresh cadence:** Rolling updates as entities renew LEIs. Bulk CSV files published daily at gleif.org for high-volume use.
-
-**Rate limit:** No hard limit published; fair-use basis. Script enforces 0.5s between requests. Use bulk downloads for thousands of lookups.
-
----
-
-### Wikidata (Global Knowledge Graph)
-
-**What it covers:** Cross-jurisdiction entity metadata, identifier cross-references (LEI, ISIN, ticker), stock exchange memberships, and ownership relationships. Quality is community-maintained.
-
-**Sample query (SPARQL):**
-
-```sparql
-SELECT ?company ?companyLabel ?ticker ?lei WHERE {
-  ?company wdt:P31  wd:Q4830453 ;
-           wdt:P414 wd:Q13677    ;
-           wdt:P249 ?ticker .
-  OPTIONAL { ?company wdt:P1278 ?lei . }
-  SERVICE wikibase:label { bd:serviceParam wikibase:language "en" . }
-}
-LIMIT 10
-```
-
-Run interactively at https://query.wikidata.org or via curl:
-
-```bash
-curl -G "https://query.wikidata.org/sparql" \
-  --data-urlencode 'query=SELECT ?item ?itemLabel WHERE { ?item wdt:P31 wd:Q4830453 . SERVICE wikibase:label { bd:serviceParam wikibase:language "en" . } } LIMIT 5' \
-  -H "Accept: application/json" \
-  -H "User-Agent: TradeInt research@tradeint.com"
-```
-
-**Refresh cadence:** Community-maintained; no guaranteed schedule. Use weekly bulk dumps for high-volume use.
-
-**Rate limit:** 60 sec processing/60-sec window; max 5 parallel queries per IP. As of May 2026, significantly slower than prior years — keep queries narrow, always set LIMIT.
+**Refresh cadence:** Rolling updates as entities renew LEIs (annual). Bulk CSV available at gleif.org.
+**Rate limit:** No hard limit; fair-use basis. Script enforces 0.5s between requests.
 
 ---
 
 ### OpenFIGI (Global Identifier Mapping)
 
-**What it covers:** Maps ISIN, CUSIP, SEDOL, ticker, and 20+ identifier types to FIGI (Financial Instrument Global Identifier). Essential for resolving the same security across different data sources.
+**What it covers:** Maps tickers and ISINs to compositeFIGI. Essential for cross-source entity resolution.
 
-**Setup:** Register for a free API key at openfigi.com. Add to `.env`: `OPENFIGI_API_KEY=your_key_here`
+⚠️ **V2 API sunset: 2026-07-01 — script already uses V3 only.**
 
-⚠️ V2 API sunset: 1 July 2026 — use V3 only.
+**Setup:** Register free API key at openfigi.com. Add to `.env`: `OPENFIGI_API_KEY=your_key_here`
 
-**Sample query:**
+**Fields populated:** `figi`, `isin`, `exchange`, `jurisdiction`, `company_name`, `ticker`
+
+**Run the script:**
 
 ```bash
-# Map ISIN to FIGI (Apple Inc.)
-curl -X POST "https://api.openfigi.com/v3/mapping" \
-  -H "Content-Type: application/json" \
-  -H "X-OPENFIGI-APIKEY: $OPENFIGI_API_KEY" \
-  -d '[{"idType": "ID_ISIN", "idValue": "US0378331005"}]'
+# US tickers (default exchange: US)
+python openfigi_pull.py --tickers AAPL,MSFT
+
+# Non-US tickers — prefix with exchange code
+python openfigi_pull.py --tickers AAPL,MSFT,SP:D05,LN:HSBA,JP:7203
+
+# Map by ISIN
+python openfigi_pull.py --isins US0378331005,SG1L01001701
 ```
 
-**Rate limit:** With key: 25 req/6s, 100 jobs/request. Without key: 25 req/min, 10 jobs/request.
+**Exchange code reference:**
+
+| Code | Exchange |
+|---|---|
+| US | NYSE / NASDAQ |
+| SP | SGX (Singapore) |
+| LN | LSE (London) |
+| JP | Tokyo Stock Exchange |
+| AU | ASX (Australia) |
+| MK | Bursa Malaysia |
+
+**Rate limit:** With key: 25 req/6s. Without key: 25 req/min.
 
 ---
 
-## 4. Tier 2 — Commercial / No-Public-API Sources
+### Wikidata (Global Knowledge Graph — Auxiliary)
+
+**Role in pipeline:** Auxiliary source only. Used exclusively for `founded_year` (the only free structured source for this field). `website` and `ticker` are now sourced from EODHD.
+
+**Fields populated:** `founded_year`, `website` (fallback only), `ticker` (fallback only)
+
+**Run the script:**
+
+```bash
+python wikidata_pull.py --companies "Apple Inc,Microsoft Corporation,Toyota Motor"
+```
+
+**Known issues:**
+- Occasional HTTP 502/503 (Wikidata infrastructure) — script handles gracefully with warning
+- Coverage drops for small/mid-cap companies
+- `founded_year` may lag for recently incorporated entities
+
+**Refresh cadence:** Community-maintained; no guaranteed schedule.
+**Rate limit:** 60-second processing window. Script enforces 2s between requests.
+
+---
+
+## 4. Tier 2 — Commercial API Sources
+
+### EODHD (EOD Historical Data — Global Fundamentals)
+
+**What it covers:** Company fundamentals globally — profile data, financials, officers, ESG signals. Primary source for 15 schema v2.2 fields that have no free equivalent.
+
+**Setup:** Add API key to `.env`: `EODHD_API_KEY=your_key_here`
+Demo key (AAPL.US only): `6a1422a45b7334.07835825`
+
+**Fields populated:**
+
+| Layer | Fields |
+|---|---|
+| Layer 2 | `cusip` (US only) |
+| Layer 3 | `company_description`, `ipo_date`, `fiscal_year_end`, `industry_sector` (GICS), `industry_code`, `industry_classification_scheme`, `hq_address`, `employee_count`, `employee_count_date`, `website`, `phone`, `officers`, `cross_listings` |
+| Layer 4 | `market_cap_usd`, `market_cap_date`, `revenue_usd`, `revenue_period`, `net_income_usd`, `net_income_period` |
+| Layer 5 | `is_delisted` |
+
+**Ticker format:** `SYMBOL.EXCHANGE` — e.g. `AAPL.US`, `D05.SG`, `HSBA.LSE`, `7203.TSE`
+
+**Run the script:**
+
+```bash
+# With demo key (AAPL.US only)
+python eodhd_pull.py --tickers AAPL.US --apikey demo
+
+# With paid key (all markets)
+python eodhd_pull.py --tickers AAPL.US,MSFT.US,D05.SG,HSBA.LSE --env
+
+# Custom output
+python eodhd_pull.py --tickers AAPL.US,MSFT.US --env --out eodhd_results.csv
+```
+
+**Sample output:**
+
+```
+eodhd_pull.py v1.0 — paid key
+  AAPL.US … revenue=$416,161,000,000  mktcap=$4,535,749,181,440  employees=166000
+  MSFT.US … revenue=$281,724,000,000  mktcap=$...  employees=...
+
+✓ Wrote 2 row(s) → eodhd_results.csv
+```
+
+**Known limitations:**
+
+| Issue | Detail |
+|---|---|
+| Demo key limited to AAPL.US | All other tickers return HTTP 403 with demo key |
+| Non-US market coverage unverified | Known Issue #4 — awaiting sample data from EODHD support |
+| `founded_year` not available | EODHD provides `ipo_date` (listing date) but not incorporation year — use Wikidata for `founded_year` |
+
+**Pricing:** Free plan: 20 calls/day. Paid plans from ~€50/month. See eodhd.com/pricing.
+**Rate limit:** Free: 20 req/day. Paid: up to 100,000 req/day. Script enforces 0.5s between requests.
 
 ### SGX Company Announcements (Singapore)
 
@@ -309,7 +337,49 @@ S&P Capital IQ Pro covers global listed and private company fundamentals, filing
 
 ---
 
-## 5. Known Failures and Remediation
+## 6. Merging All Sources — merge_v2.py
+
+`merge_v2.py` reads all source CSVs and combines them into two output files:
+- `merged_profiles.csv` — one row per company (entity-centric, 56 + 3 metadata fields)
+- `merged_filings.csv` — one row per filing event, linked to profiles via `source_id` + `lei`
+
+**Full pipeline run:**
+
+```bash
+python edgar_8k_pull.py --tickers AAPL,MSFT --out edgar_8k_results.csv
+python edgar_xbrl_pull.py --tickers AAPL,MSFT --out edgar_xbrl_results.csv
+python eodhd_pull.py --tickers AAPL.US,MSFT.US --env --out eodhd_results.csv
+python gleif_pull.py --companies "Apple Inc,Microsoft Corporation" --out gleif_results.csv
+python openfigi_pull.py --tickers AAPL,MSFT --out openfigi_results.csv
+python wikidata_pull.py --companies "Apple Inc,Microsoft Corporation" --out wikidata_results.csv
+
+python merge_v2.py \
+  --inputs edgar_8k_results.csv edgar_xbrl_results.csv eodhd_results.csv \
+           gleif_results.csv openfigi_results.csv wikidata_results.csv
+```
+
+**Entity resolution priority:**
+
+| Level | Match key | Confidence |
+|---|---|---|
+| 1 | `lei` exact match | HIGH |
+| 2 | `isin` exact match | HIGH |
+| 3 | `ticker` + `exchange` | MEDIUM |
+| 4 | Normalised company name (suffix-stripped) | MEDIUM |
+
+**LEI propagation:** Before entity resolution, `merge_v2.py` builds a `name → lei` map from GLEIF rows and propagates LEI to matching rows from other sources. This ensures EODHD / EDGAR rows merge correctly with GLEIF rows even when they have no LEI.
+
+**Field merge rules:**
+
+| Rule | Applied to |
+|---|---|
+| AUTHORITATIVE | `lei`, `lei_status`, `legal_form` → GLEIF; `figi`, `isin` → OpenFIGI; `credit_rating` → S&P |
+| LATEST (most recent `_date`) | `market_cap_usd`, `revenue_usd`, `net_income_usd`, `employee_count` |
+| FIRST_TRUSTED | All other fields; trust order: GLEIF > EDGAR > EODHD > EDINET > Wikidata > OpenFIGI > exchanges |
+
+---
+
+## 7. Known Failures and Remediation
 
 | What you see | What it means | What to do |
 |---|---|---|
@@ -317,17 +387,19 @@ S&P Capital IQ Pro covers global listed and private company fundamentals, filing
 | `not found in SEC company_tickers.json` | Ticker not SEC-registered, delisted, or mistyped | Search at https://www.sec.gov/cgi-bin/browse-edgar |
 | `HTTP 429` from SEC | Too many requests | Do not run multiple script instances; wait and retry |
 | `HTTP 429` from Wikidata | Query processing limit exceeded | Simplify query, add LIMIT, wait for `Retry-After` |
+| `HTTP 403` from EODHD | API key lacks access to this ticker | Demo key only works for AAPL.US; paid key required for other tickers |
 | `HTTP 403` on GitHub push | PAT missing `workflow` scope | Regenerate PAT at github.com/settings/tokens/new with `repo` + `workflow` scopes |
-| `No 8-K filings found` | No 8-Ks in the look-back window | Normal — try `--days 30` to widen coverage |
-| `No active LEI records found` | Company name not matched in GLEIF | Use the official registered legal name; try a shorter version of the name |
-| `category` column missing from CSV | Actions ran an old cached version of the script | Trigger a brand-new run via **Run workflow** button (not Re-run) |
-| Wikidata query times out | Graph too large / query too broad | Add more filters, reduce LIMIT, or use bulk dumps |
-| OpenFIGI returns empty | Identifier not found or wrong `idType` | Check idType spelling; try `ID_TICKER` with `exchCode` instead of ISIN |
-| `ValueError: dict contains fields not in fieldnames` on merge | `filings.csv` was generated by an old version of the script | Re-run `edgar_8k_pull.py` locally to regenerate with standard field names |
+| `No active LEI records found` | Company name not matched in GLEIF | Use the official registered legal name; try a shorter version |
+| `Wikidata 502 Bad Gateway` | Wikidata infrastructure issue | Transient — script handles gracefully and skips; retry later |
+| `No data retrieved. CSV not written` from eodhd_pull.py | All tickers returned 403 or 404 | Check ticker format (must be SYMBOL.EXCHANGE); verify API key |
+| Same company appears as multiple profiles in merge | Entity resolution failed — names differ across sources | Check `match_confidence` column; ensure GLEIF has been run so LEI can propagate |
+| `company_description` empty in merged_profiles | EODHD step failed or only demo key used | Run `eodhd_pull.py` with paid key; verify `eodhd_results.csv` exists before merge |
+| `data_completeness_score` unexpectedly low | Key fields missing | Check which source CSVs were included in merge; re-run missing sources |
+| `category` column all `Other` | 8-K descriptions not matching classification rules | Review `CATEGORY_RULES` in `edgar_8k_pull.py`; add keywords for your sector |
 
 ---
 
-## 6. Upgrade / Rollback / Emergency Stop
+## 8. Upgrade / Rollback / Emergency Stop
 
 ### Upgrading
 
@@ -361,4 +433,4 @@ Re-enable via the same path → **Enable workflow**.
 
 ---
 
-*Runbook maintained by Tian Manyan (Product Intern, TradeInt). Last reviewed May 2026.*
+*Runbook maintained by Tian Manyan (Product Intern, TradeInt). Last reviewed 2026-05-26.*
