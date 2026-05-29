@@ -449,9 +449,9 @@ The `officers` field contains an array of officer records serialised as a JSON s
 
 | # | Issue | Affected Field / Source | Deadline | Action Required |
 |---|---|---|---|---|
-| 1 | OpenFIGI v2 API sunsets | `figi` (#9) | **2026-07-01** | Migrate all scripts to `/v3/mapping` endpoint before this date |
+| 1 | OpenFIGI v2 API sunsets (RESOLVED) | `figi` (#9) | **2026-07-01** | Migrate all scripts to `/v3/mapping` endpoint before this date |
 | 2 | GRI database frozen since December 2020 | `esg_report_url` (#41) | Already past | Do not use GRI as live source; use CDP or company IR page |
-| 3 | `exchange` field hardcoded to `NYSE/NASDAQ` in `edgar_8k_pull.py` | `exchange` (#2) | Week 2 fix | Resolve per-company using `exchanges` array in submissions JSON |
+| 3 | `exchange` field hardcoded to `NYSE/NASDAQ` in `edgar_8k_pull.py` (RESOLVED) | `exchange` (#2) | Week 2 fix | Resolve per-company using `exchanges` array in submissions JSON |
 | 4 | EODHD non-US market coverage unverified | All EODHD-sourced fields for non-US markets | Pending | Awaiting sample data from EODHD support for SGX, LSE, ASX, Bursa, NSE, BSE, Euronext, TWSE. Do not mark EODHD as verified primary source for non-US markets until confirmed. |
 
 ---
