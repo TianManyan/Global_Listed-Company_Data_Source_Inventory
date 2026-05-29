@@ -1,8 +1,22 @@
 """
-edgar_8k_pull.py v2.0 — Pull 8-K filings for a list of tickers from SEC EDGAR.
+edgar_8k_pull.py v2.1 — Pull 8-K filings for a list of tickers from SEC EDGAR.
 
-Output follows TradeInt standard schema v2.1 (49 fields).
+Output follows TradeInt standard schema v2.2 (56 fields).
 Compatible with merge_v2.py directly — no field name translation needed.
+
+New in v2.1 vs v2.0
+--------------------
+- Schema bumped to v2.2 (56 fields); FIELDNAMES now imported from schema.py
+- exchange field (#2) resolved per-company from the `exchanges` array in
+  submissions JSON (fixes Known Issue #3 — was hardcoded to "NYSE/NASDAQ")
+  Falls back to empty string if the array is absent or empty.
+
+New in v2.1 vs v2.0
+--------------------
+- Schema bumped to v2.2 (56 fields); FIELDNAMES now imported from schema.py
+- exchange field (#2) resolved per-company from the `exchanges` array in
+  submissions JSON (fixes Known Issue #3 — was hardcoded to "NYSE/NASDAQ").
+  Falls back to empty string if the array is absent or empty.
 
 New in v2.0 vs v1.0
 --------------------
@@ -37,9 +51,10 @@ MIN_REQUEST_INTERVAL = 0.11  # 1/10 req/sec + small buffer
 _last_request_time: float = 0.0
 
 # ---------------------------------------------------------------------------
-# Schema v2.1 output fields — imported from schema.py (single source of truth)
+# Schema v2.2 output fields — imported from schema.py (single source of truth)
+# All 56 fields present in output; unpopulated fields are empty string.
 # ---------------------------------------------------------------------------
-from schema import FIELDNAMES, CATEGORY_VOCAB  # noqa: E402
+from schema import FIELDNAMES
 
 # ---------------------------------------------------------------------------
 # 8-K category classifier
@@ -96,16 +111,7 @@ def fetch_8k_filings(cik: str, ticker: str, max_filings: int) -> list[dict]:
     sic_desc     = data.get("sicDescription", "")
     state_of_inc = data.get("stateOfIncorporation", "")
     exchanges    = data.get("exchanges", [])
-    # Map EDGAR exchange names to standard codes
-    # EDGAR returns full names like "NYSE", "Nasdaq", "NYSE MKT" etc.
-    _EXCH_MAP = {
-        "NYSE": "NYSE", "Nasdaq": "NASDAQ", "NASDAQ": "NASDAQ",
-        "NYSE MKT": "NYSE MKT", "NYSE Arca": "NYSE ARCA",
-        "CBOE": "CBOE", "OTC": "OTC",
-    }
-    exchange_str = "/".join(
-        _EXCH_MAP.get(e, e) for e in exchanges
-    ) if exchanges else ""  # empty if not listed on a named exchange
+    exchange_str = "/".join(exchanges) if exchanges else ""  # resolved per-company; empty if EDGAR omits the field
 
     filings      = data.get("filings", {}).get("recent", {})
     forms        = filings.get("form", [])
@@ -149,6 +155,7 @@ def fetch_8k_filings(cik: str, ticker: str, max_filings: int) -> list[dict]:
             "lei":              "",
             "isin":             "",
             "figi":             "",
+            "cusip":            "",
             # Layer 3 — fields available from submissions JSON
             "company_name_local":              "",
             "company_description":             "",
@@ -163,6 +170,9 @@ def fetch_8k_filings(cik: str, ticker: str, max_filings: int) -> list[dict]:
             "employee_count_date":             "",
             "website":                         "",
             "primary_products_services":       "",
+            "phone":                           "",
+            "officers":                        "",
+            "cross_listings":                  "",
             "parent_company_name":             "",
             "parent_lei":                      "",
             "is_listed_subsidiary":            "",
@@ -178,6 +188,7 @@ def fetch_8k_filings(cik: str, ticker: str, max_filings: int) -> list[dict]:
             "lei_last_updated":       "",
             "lei_next_renewal_date":  "",
             "exchange_verified":      "True",
+            "is_delisted":            "",
             "latest_filing_date":     latest_filing_date,
             "filing_frequency_12m":   filing_freq_12m,
             "data_completeness_score": "",
@@ -195,7 +206,7 @@ def fetch_8k_filings(cik: str, ticker: str, max_filings: int) -> list[dict]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Fetch 8-K filings from SEC EDGAR (schema v2.1).")
+    parser = argparse.ArgumentParser(description="Fetch 8-K filings from SEC EDGAR (schema v2.2).")
     parser.add_argument("--tickers", required=True, help="Comma-separated tickers, e.g. AAPL,MSFT")
     parser.add_argument("--max-filings", type=int, default=20, help="Max 8-K rows per ticker (default 20)")
     parser.add_argument("--out", default="edgar_8k_results.csv", help="Output CSV path")
