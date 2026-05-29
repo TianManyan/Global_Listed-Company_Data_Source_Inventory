@@ -62,12 +62,53 @@ jobs:
             --companies "Apple Inc,Microsoft Corporation,DBS Group Holdings,HSBC Holdings,Toyota Motor" \
             --out gleif_results.csv
 
-      # 4e. OpenFIGI — ticker → FIGI + ISIN mapping
+      # 4e-pre. Extract ISINs from upstream CSVs for OpenFIGI lookup
+      #     Collects non-empty ISIN values from EDGAR and GLEIF outputs,
+      #     deduplicates, and writes one ISIN per line to isins_for_figi.txt.
+      #     Falls back gracefully if upstream CSVs are missing or have no ISINs.
+      - name: Extract ISINs from upstream outputs
+        run: |
+          python - << 'PYEOF'
+          import csv, pathlib
+
+          sources = ["edgar_8k_results.csv", "gleif_results.csv", "eodhd_results.csv"]
+          isins = set()
+          for src in sources:
+              p = pathlib.Path(src)
+              if not p.exists():
+                  print(f"  [SKIP] {src} not found")
+                  continue
+              with open(p, newline="", encoding="utf-8") as f:
+                  reader = csv.DictReader(f)
+                  if "isin" not in (reader.fieldnames or []):
+                      print(f"  [SKIP] {src} has no isin column")
+                      continue
+                  for row in reader:
+                      val = row.get("isin", "").strip()
+                      if val and len(val) == 12:   # basic ISIN format check
+                          isins.add(val)
+
+          out = pathlib.Path("isins_for_figi.txt")
+          if isins:
+              out.write_text("\n".join(sorted(isins)) + "\n")
+              print(f"  Wrote {len(isins)} unique ISIN(s) to {out}")
+          else:
+              # Write empty file so the next step does not error on missing file
+              out.write_text("")
+              print("  [WARN] No ISINs found in upstream outputs — isins_for_figi.txt is empty")
+          PYEOF
+
+      # 4e. OpenFIGI — ISIN → compositeFIGI mapping (v3 API, dynamic input)
+      #     Input: isins_for_figi.txt built from upstream EDGAR / GLEIF / EODHD outputs.
+      #     Automatically stays in sync with watchlist — no hardcoded ISINs.
+      #     Skipped gracefully if no ISINs were found upstream (continue-on-error: true).
+      #     API key optional but recommended (raises rate limit to 25 req/6s).
       - name: Run openfigi_pull.py
         continue-on-error: true
         run: |
           python openfigi_pull.py \
-            --tickers AAPL,MSFT,SP:D05,LN:HSBA \
+            --file isins_for_figi.txt \
+            --id-type ID_ISIN \
             --env --out openfigi_results.csv
 
       # 4f. Wikidata — auxiliary source for founded_year only
