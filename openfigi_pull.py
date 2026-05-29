@@ -1,58 +1,72 @@
 """
-openfigi_pull.py v1.0 — Map tickers/ISINs to FIGI via OpenFIGI API.
+openfigi_pull.py v1.0 — Map identifiers to FIGI using the OpenFIGI v3 API.
 
-Resolves company identifiers (ticker, ISIN) to:
-  - compositeFIGI  → company-level global identifier
-  - isin           → International Securities Identification Number
-  - exchange code  → which exchange the security trades on
+Resolves ISIN (or ticker) to compositeFIGI and ISIN for the TradeInt
+standard schema (Layer 2 fields: figi #9, isin #8).
 
-Output follows TradeInt schema v2.1 (49 fields).
+Output follows TradeInt standard schema v2.2 (56 fields).
 Compatible with merge_v2.py directly.
 
-Fields populated
-----------------
-Layer 2:  figi (#9), isin (#8)
-Layer 1:  exchange (#2) — from OpenFIGI exchCode
+Why OpenFIGI?
+-------------
+OpenFIGI is the authoritative free source for compositeFIGI and cross-
+validated ISIN. Both are AUTHORITATIVE fields in merge_v2.py — OpenFIGI
+values overwrite other sources for figi and isin.
 
-Role in the pipeline
---------------------
-OpenFIGI is the first step in the identity resolution chain:
-  ticker → OpenFIGI → FIGI + ISIN → GLEIF (LEI) → EDGAR / EDINET
+API version
+-----------
+Uses OpenFIGI v3 only (/v3/mapping). V2 was sunset 2026-07-01.
 
-⚠️  V2 API sunset: 2026-07-01 — this script uses V3 only (/v3/mapping).
+Rate limits (per API docs)
+--------------------------
+  Without API key : 25 requests/minute, 10 jobs/request
+  With API key    : 25 requests/6 seconds, 100 jobs/request
+  Script enforces conservative delay; set OPENFIGI_API_KEY in .env for
+  higher throughput.
 
-Dependencies: requests  (pip install requests)
-API docs:     https://www.openfigi.com/api/documentation
+Identifier types supported (-t / --id-type)
+-------------------------------------------
+  ID_ISIN    — International Securities Identification Number (default)
+  TICKER     — Exchange ticker + exchange code (requires --exch-code)
+  ID_CUSIP   — CUSIP (US only)
+  ID_SEDOL   — SEDOL (UK / Ireland)
 
-Rate limits (V3)
-----------------
-Without API key : 25 req/min, max 10 jobs/request
-With API key    : 25 req/6s,  max 100 jobs/request
-HTTP 429 returned when limit exceeded.
+Output
+------
+One row per FIGI returned per input identifier. If an ISIN maps to
+multiple FIGIs (e.g. the same security on multiple exchanges), each
+FIGI is a separate row. merge_v2.py deduplicates by compositeFIGI.
 
 Usage
 -----
-  # No API key (slower rate limit)
-  python openfigi_pull.py --tickers AAPL,MSFT,D05
+  # Map ISINs (most common)
+  python openfigi_pull.py --ids US0378331005,US5949181045
 
-  # With API key (recommended)
-  python openfigi_pull.py --tickers AAPL,MSFT --apikey YOUR_KEY
+  # Map ISINs from a file (one per line)
+  python openfigi_pull.py --file isins.txt
 
-  # From .env file
-  python openfigi_pull.py --tickers AAPL,MSFT --env
+  # Map tickers (requires --exch-code)
+  python openfigi_pull.py --ids AAPL --id-type TICKER --exch-code US
 
-  # Map by ISIN instead of ticker
-  python openfigi_pull.py --isins US0378331005,US5949181045
+  # Use API key from .env for higher rate limit
+  python openfigi_pull.py --ids US0378331005 --env
 
-  # Custom output
-  python openfigi_pull.py --tickers AAPL,MSFT --out results/figi_2026-05-25.csv
+  # Custom output path
+  python openfigi_pull.py --ids US0378331005 --out results/figi_2026-06-01.csv
+
+Dependencies: requests  (pip install requests)
+              python-dotenv  (pip install python-dotenv)  — optional
+API docs:     https://www.openfigi.com/api/documentation
 """
 
 import argparse
 import csv
+import json
 import os
 import sys
 import time
+import traceback
+from datetime import datetime, timezone
 from pathlib import Path
 
 try:
@@ -60,157 +74,194 @@ try:
 except ImportError:
     sys.exit("Missing dependency: pip install requests")
 
+from schema import FIELDNAMES
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-OPENFIGI_URL = "https://api.openfigi.com/v3/mapping"
-HEADERS_BASE = {"Content-Type": "application/json"}
+BASE_DIR     = Path(__file__).parent
+LOG_PATH     = BASE_DIR / "logs" / "run.log"
+DEFAULT_OUT  = BASE_DIR / "openfigi_results.csv"
 
-# Rate limit: without key = 25/min → 1 req per 2.5s to be safe
-# With key = 25/6s → 1 req per 0.25s to be safe
-INTERVAL_NO_KEY  = 2.5
-INTERVAL_WITH_KEY = 0.3
+OPENFIGI_URL = "https://api.openfigi.com/v3/mapping"
+
+# Rate limit: 25 req/min without key  →  1 req per 2.4s (conservative)
+#             25 req/6s  with key     →  1 req per 0.24s (conservative)
+DELAY_NO_KEY  = 2.5   # seconds between batch requests (no key)
+DELAY_WITH_KEY = 0.30  # seconds between batch requests (with key)
+
+# Batch size: max jobs per request (10 without key, 100 with key)
+BATCH_NO_KEY  = 10
+BATCH_WITH_KEY = 100
 
 _last_request_time: float = 0.0
 
-# ---------------------------------------------------------------------------
-# Schema v2.1 output fields (all 49 — only figi, isin, exchange populated)
-# ---------------------------------------------------------------------------
-from schema import FIELDNAMES  # single source of truth — schema.py
-
-# ---------------------------------------------------------------------------
-# Exchange code → jurisdiction mapping
-# Covers major exchanges in TradeInt's scope
-# ---------------------------------------------------------------------------
-EXCH_TO_JURISDICTION = {
-    "US": "US", "UN": "US", "UW": "US", "UA": "US",  # NYSE / NASDAQ variants
-    "LN": "GB",   # London Stock Exchange
-    "JP": "JP", "JT": "JP",  # Tokyo Stock Exchange
-    "SP": "SG",   # Singapore Exchange
-    "AU": "AU",   # ASX
-    "MK": "MY",   # Bursa Malaysia
-    "IS": "IN",   # NSE India
-    "IB": "IN",   # BSE India
-    "KS": "KR",   # Korea Exchange
-    "TT": "TW",   # Taiwan Stock Exchange
-    "FP": "FR",   # Euronext Paris
-    "NA": "NL",   # Euronext Amsterdam
-    "BB": "BE",   # Euronext Brussels
-    "HK": "HK",   # Hong Kong Exchange
-    "SS": "CN", "SZ": "CN",  # Shanghai / Shenzhen
-    "GY": "DE",   # Deutsche Börse
-}
 
 # ---------------------------------------------------------------------------
 # HTTP helper
 # ---------------------------------------------------------------------------
-def _post(payload: list[dict], api_key: str) -> dict:
-    """POST to OpenFIGI mapping endpoint with rate limiting."""
-    global _last_request_time
-    interval = INTERVAL_WITH_KEY if api_key else INTERVAL_NO_KEY
-    elapsed = time.monotonic() - _last_request_time
-    if elapsed < interval:
-        time.sleep(interval - elapsed)
+def _post_batch(jobs: list[dict], api_key: str) -> list[dict]:
+    """
+    POST one batch of mapping jobs to OpenFIGI v3 /mapping.
 
-    headers = dict(HEADERS_BASE)
+    Each job is a dict like {"idType": "ID_ISIN", "idValue": "US0378331005"}.
+    Returns the list of result objects (one per job; may be {"error": "..."}).
+    """
+    global _last_request_time
+
+    delay = DELAY_WITH_KEY if api_key else DELAY_NO_KEY
+    elapsed = time.monotonic() - _last_request_time
+    if elapsed < delay:
+        time.sleep(delay - elapsed)
+
+    headers = {"Content-Type": "application/json"}
     if api_key:
         headers["X-OPENFIGI-APIKEY"] = api_key
 
-    resp = requests.post(OPENFIGI_URL, json=payload, headers=headers, timeout=15)
+    resp = requests.post(OPENFIGI_URL, headers=headers, json=jobs, timeout=20)
     _last_request_time = time.monotonic()
 
     if resp.status_code == 429:
-        retry_after = int(resp.headers.get("Retry-After", 10))
-        print(f"  [WARN] Rate limited — waiting {retry_after}s …")
-        time.sleep(retry_after)
-        return _post(payload, api_key)   # one retry
+        # Rate limited — wait 60s and retry once
+        print("  [WARN] Rate limited (HTTP 429). Waiting 60s …", flush=True)
+        time.sleep(60)
+        resp = requests.post(OPENFIGI_URL, headers=headers, json=jobs, timeout=20)
+        _last_request_time = time.monotonic()
 
     resp.raise_for_status()
     return resp.json()
 
 
 # ---------------------------------------------------------------------------
-# Core mapping function
+# FIGI result → schema row mapper
 # ---------------------------------------------------------------------------
-def map_ticker(ticker: str, exch_code: str, api_key: str) -> dict | None:
+def _figi_to_row(figi_obj: dict, input_id: str, id_type: str) -> dict:
     """
-    Map a ticker + exchange to FIGI and ISIN via OpenFIGI.
+    Map one FIGI result object to a TradeInt schema v2.2 row.
 
-    Returns the best match (Common Stock, primary exchange) or None.
+    OpenFIGI returns data per instrument (share class / exchange listing).
+    We store the compositeFIGI in figi (#9) and populate what we can.
+    All other fields are empty — merge_v2.py fills them from other sources.
     """
-    payload = [{"idType": "TICKER", "idValue": ticker, "exchCode": exch_code}]
-    try:
-        results = _post(payload, api_key)
-    except requests.HTTPError as e:
-        print(f"  [ERROR] {ticker}: HTTP {e.response.status_code}")
-        return None
+    # compositeFIGI is the company-level identifier we want
+    composite_figi = figi_obj.get("compositeFIGI", "")
+    share_class    = figi_obj.get("shareClassFIGI", "")
+    ticker         = figi_obj.get("ticker", "")
+    exch_code      = figi_obj.get("exchCode", "")
+    name           = figi_obj.get("name", "")
+    security_type  = figi_obj.get("securityType", "")
+    security_type2 = figi_obj.get("securityType2", "")
 
-    # results is a list with one element per job
-    job_result = results[0] if results else {}
-    if "error" in job_result:
-        return None
+    # isin: only available when input was an ISIN
+    isin = input_id if id_type == "ID_ISIN" else ""
 
-    hits = job_result.get("data", [])
-    if not hits:
-        return None
+    # exchCode → jurisdiction (best effort; not authoritative — use GLEIF)
+    jurisdiction_map = {
+        "US": "US", "LN": "GB", "AU": "AU", "JP": "JP",
+        "HK": "HK", "SG": "SG", "KS": "KR", "TT": "TW",
+        "IN": "IN", "FP": "FR", "GY": "DE", "SM": "ES",
+        "IM": "IT", "NA": "NL", "BB": "BE", "ID": "ID",
+        "MK": "MY", "VN": "VN", "CN": "CN",
+    }
+    jurisdiction = jurisdiction_map.get(exch_code, "")
 
-    # Prefer Common Stock in marketSector = Equity
-    def _score(h):
-        return (
-            (1 if h.get("securityType") == "Common Stock" else 0) +
-            (1 if h.get("marketSector") == "Equity" else 0)
-        )
-    best = sorted(hits, key=_score, reverse=True)[0]
-    return best
-
-
-def map_isin(isin: str, api_key: str) -> dict | None:
-    """Map an ISIN to FIGI via OpenFIGI."""
-    payload = [{"idType": "ID_ISIN", "idValue": isin}]
-    try:
-        results = _post(payload, api_key)
-    except requests.HTTPError as e:
-        print(f"  [ERROR] {isin}: HTTP {e.response.status_code}")
-        return None
-
-    job_result = results[0] if results else {}
-    if "error" in job_result:
-        return None
-
-    hits = job_result.get("data", [])
-    if not hits:
-        return None
-
-    def _score(h):
-        return (
-            (1 if h.get("securityType") == "Common Stock" else 0) +
-            (1 if h.get("marketSector") == "Equity" else 0)
-        )
-    return sorted(hits, key=_score, reverse=True)[0]
-
-
-def build_row(hit: dict, input_ticker: str = "", input_isin: str = "") -> dict:
-    """Convert an OpenFIGI hit to a schema v2.1 row."""
     row = {f: "" for f in FIELDNAMES}
-
-    exch_code  = hit.get("exchCode", "")
-    figi       = hit.get("compositeFIGI", hit.get("figi", ""))
-    isin       = hit.get("isin", input_isin)
-    name       = hit.get("name", "")
-    ticker_out = hit.get("ticker", input_ticker)
-    jurisdiction = EXCH_TO_JURISDICTION.get(exch_code, "")
-
-    row["source"]       = "OPENFIGI"
-    row["exchange"]     = exch_code
-    row["jurisdiction"] = jurisdiction
-    row["company_name"] = name
-    row["ticker"]       = ticker_out
-    row["source_id"]    = figi          # use compositeFIGI as source_id for OpenFIGI
-    row["figi"]         = figi
-    row["isin"]         = isin
-    row["document_url"] = f"https://www.openfigi.com/id/{figi}" if figi else ""
-
+    row.update({
+        # Layer 1
+        "source":       "OPENFIGI",
+        "exchange":     exch_code,
+        "jurisdiction": jurisdiction,
+        # Layer 2
+        "company_name": name,
+        "ticker":       ticker,
+        "source_id":    composite_figi,   # compositeFIGI is the entity-level ID
+        "isin":         isin,
+        "figi":         composite_figi,
+    })
     return row
+
+
+# ---------------------------------------------------------------------------
+# Main mapping function
+# ---------------------------------------------------------------------------
+def map_identifiers(
+    identifiers: list[str],
+    id_type: str,
+    exch_code: str,
+    api_key: str,
+) -> list[dict]:
+    """
+    Map a list of identifiers to FIGI rows using OpenFIGI v3 /mapping.
+
+    Returns a flat list of schema v2.2 rows (one per FIGI result).
+    Errors are logged to stderr; the identifier is skipped.
+    """
+    batch_size = BATCH_WITH_KEY if api_key else BATCH_NO_KEY
+    all_rows: list[dict] = []
+
+    for i in range(0, len(identifiers), batch_size):
+        batch_ids  = identifiers[i : i + batch_size]
+        batch_jobs = []
+        for id_val in batch_ids:
+            job: dict = {"idType": id_type, "idValue": id_val}
+            if exch_code:
+                job["exchCode"] = exch_code
+            # Restrict to Common Stock to avoid ETF / bond / warrant noise
+            job["securityType"] = "Common Stock"
+            batch_jobs.append(job)
+
+        print(
+            f"  Batch {i // batch_size + 1}: "
+            f"{len(batch_jobs)} job(s) … ",
+            end="",
+            flush=True,
+        )
+
+        try:
+            results = _post_batch(batch_jobs, api_key)
+        except requests.HTTPError as exc:
+            print(f"HTTP error: {exc}", file=sys.stderr)
+            continue
+
+        batch_hits = 0
+        for id_val, result in zip(batch_ids, results):
+            if "error" in result:
+                # Identifier not found or invalid — not a script error
+                print(f"\n    [WARN] {id_val}: {result['error']}", file=sys.stderr)
+                continue
+            figi_list = result.get("data", [])
+            for figi_obj in figi_list:
+                row = _figi_to_row(figi_obj, id_val, id_type)
+                all_rows.append(row)
+                batch_hits += 1
+
+        print(f"{batch_hits} FIGI record(s)")
+
+    return all_rows
+
+
+# ---------------------------------------------------------------------------
+# Logging helper
+# ---------------------------------------------------------------------------
+def append_run_log(
+    n_inputs: int,
+    n_hits: int,
+    elapsed_sec: float,
+    error_code: str,
+    out_path: Path,
+) -> None:
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    line = (
+        f"{ts}\t"
+        f"n_inputs={n_inputs}\t"
+        f"hits={n_hits}\t"
+        f"elapsed_sec={elapsed_sec:.1f}\t"
+        f"error_code={error_code}\t"
+        f"out={out_path}\n"
+    )
+    with open(LOG_PATH, "a", encoding="utf-8") as f:
+        f.write(line)
 
 
 # ---------------------------------------------------------------------------
@@ -218,117 +269,157 @@ def build_row(hit: dict, input_ticker: str = "", input_isin: str = "") -> dict:
 # ---------------------------------------------------------------------------
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Map tickers/ISINs to FIGI via OpenFIGI API (schema v2.1).",
+        description="Map identifiers to FIGI using OpenFIGI v3 API (schema v2.2).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument(
-        "--tickers",
-        help='Comma-separated tickers, e.g. "AAPL,MSFT,D05". '
-             'Uses US exchange by default; prefix with EXCH: to specify, e.g. SP:D05',
+    id_group = parser.add_mutually_exclusive_group(required=True)
+    id_group.add_argument(
+        "--ids",
+        default="",
+        help='Comma-separated identifier values, e.g. "US0378331005,US5949181045".',
     )
-    group.add_argument(
-        "--isins",
-        help="Comma-separated ISINs, e.g. US0378331005,US5949181045",
-    )
-    parser.add_argument(
-        "--apikey", default="",
-        help="OpenFIGI API key (optional but recommended for higher rate limits). "
-             "Or use --env to load from OPENFIGI_API_KEY in .env file.",
+    id_group.add_argument(
+        "--file",
+        default="",
+        metavar="PATH",
+        help="Path to a file with one identifier per line.",
     )
     parser.add_argument(
-        "--env", action="store_true",
-        help="Load API key from OPENFIGI_API_KEY environment variable / .env file.",
+        "--id-type",
+        default="ID_ISIN",
+        choices=["ID_ISIN", "TICKER", "ID_CUSIP", "ID_SEDOL"],
+        help="Identifier type to map (default: ID_ISIN).",
     )
     parser.add_argument(
-        "--out", default="openfigi_results.csv",
-        help="Output CSV path (default: openfigi_results.csv)",
+        "--exch-code",
+        default="",
+        metavar="CODE",
+        help='Exchange code filter, e.g. "US", "LN", "AU". Required for TICKER id-type.',
+    )
+    parser.add_argument(
+        "--apikey",
+        default="",
+        metavar="KEY",
+        help="OpenFIGI API key (optional; increases rate limit to 25 req/6s).",
+    )
+    parser.add_argument(
+        "--env",
+        action="store_true",
+        help="Load OPENFIGI_API_KEY from .env file (requires python-dotenv).",
+    )
+    parser.add_argument(
+        "--out",
+        default=str(DEFAULT_OUT),
+        help=f"Output CSV path (default: {DEFAULT_OUT}).",
     )
     return parser.parse_args()
 
 
 def main() -> None:
-    args = parse_args()
-
-    # Resolve API key
-    api_key = args.apikey
-    if args.env or not api_key:
-        # Try loading from environment / .env
-        try:
-            from dotenv import load_dotenv
-            load_dotenv()
-        except ImportError:
-            pass
-        api_key = api_key or os.getenv("OPENFIGI_API_KEY", "")
-
-    key_status = "with API key" if api_key else "without API key (slower rate limit)"
-    print(f"openfigi_pull.py v1.0 — {key_status}")
-    print(f"Endpoint: {OPENFIGI_URL}")
-    print()
-
-    out = Path(args.out)
+    args     = parse_args()
+    t_start  = time.monotonic()
+    error_code = "OK"
     all_rows: list[dict] = []
 
-    if args.tickers:
-        entries = [t.strip() for t in args.tickers.split(",") if t.strip()]
-        for entry in entries:
-            # Support EXCH:TICKER format, e.g. SP:D05 for SGX
-            if ":" in entry:
-                exch_code, ticker = entry.split(":", 1)
-            else:
-                exch_code, ticker = "US", entry   # default to US exchange
+    try:
+        # ── Resolve API key ───────────────────────────────────────────────────
+        api_key = args.apikey.strip()
+        if not api_key and args.env:
+            try:
+                from dotenv import load_dotenv
+                load_dotenv()
+            except ImportError:
+                print("[WARN] python-dotenv not installed; ignoring --env.", file=sys.stderr)
+            api_key = os.getenv("OPENFIGI_API_KEY", "")
 
-            print(f"  {ticker} ({exch_code}) …", end="", flush=True)
-            hit = map_ticker(ticker, exch_code, api_key)
-            if hit:
-                row = build_row(hit, input_ticker=ticker)
-                all_rows.append(row)
-                print(f" figi={row['figi']}  isin={row['isin'] or '—'}  exch={row['exchange']}")
-            else:
-                print(" not found")
+        if api_key:
+            print(f"API key: {'*' * (len(api_key) - 4)}{api_key[-4:]}")
+            print(f"Rate limit: 25 req/6s, {BATCH_WITH_KEY} jobs/request")
+        else:
+            print("No API key — rate limit: 25 req/min, 10 jobs/request")
+            print("Register free at https://www.openfigi.com/user/register")
 
-    elif args.isins:
-        isins = [i.strip() for i in args.isins.split(",") if i.strip()]
-        for isin in isins:
-            print(f"  {isin} …", end="", flush=True)
-            hit = map_isin(isin, api_key)
-            if hit:
-                row = build_row(hit, input_isin=isin)
-                all_rows.append(row)
-                print(f" figi={row['figi']}  ticker={row['ticker']}  exch={row['exchange']}")
-            else:
-                print(" not found")
+        # ── Validate TICKER requires exch-code ───────────────────────────────
+        if args.id_type == "TICKER" and not args.exch_code:
+            sys.exit("[ERROR] --id-type TICKER requires --exch-code (e.g. --exch-code US)")
 
-    if not all_rows:
-        print("\nNo results found. CSV not written.")
-        return
+        # ── Resolve identifier list ───────────────────────────────────────────
+        if args.ids.strip():
+            identifiers = [x.strip() for x in args.ids.split(",") if x.strip()]
+        else:
+            file_path = Path(args.file)
+            if not file_path.exists():
+                sys.exit(f"[ERROR] File not found: {file_path}")
+            with open(file_path, encoding="utf-8") as f:
+                identifiers = [line.strip() for line in f if line.strip() and not line.startswith("#")]
 
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with open(out, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
-        writer.writeheader()
-        writer.writerows(all_rows)
+        if not identifiers:
+            sys.exit("[ERROR] No identifiers to process.")
 
-    print(f"\n✓ Wrote {len(all_rows)} row(s) → {out}")
-    print()
+        print(f"\n{len(identifiers)} identifier(s) to map ({args.id_type})")
+        print()
 
-    # Preview
-    col_widths = [6, 8, 4, 24, 20, 12]
-    headers_p  = ["exch", "jurisd.", "isin?", "company_name", "figi", "ticker"]
-    sep = "  ".join("-" * w for w in col_widths)
-    fmt = "  ".join(f"{{:<{w}}}" for w in col_widths)
-    print(fmt.format(*headers_p))
-    print(sep)
-    for row in all_rows:
-        print(fmt.format(
-            row["exchange"][:col_widths[0]],
-            row["jurisdiction"][:col_widths[1]],
-            "✓" if row["isin"] else "—",
-            row["company_name"][:col_widths[3]],
-            row["figi"][:col_widths[4]],
-            row["ticker"][:col_widths[5]],
-        ))
+        # ── Map ───────────────────────────────────────────────────────────────
+        all_rows = map_identifiers(
+            identifiers=identifiers,
+            id_type=args.id_type,
+            exch_code=args.exch_code,
+            api_key=api_key,
+        )
+
+        # ── Write output ──────────────────────────────────────────────────────
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if not all_rows:
+            print("\nNo FIGI records found. CSV not written.")
+            error_code = "NO_RESULTS"
+        else:
+            with open(out_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
+                writer.writeheader()
+                writer.writerows(all_rows)
+            print(f"\n✓ Wrote {len(all_rows)} row(s) to {out_path}")
+
+            # Preview
+            col_widths = [22, 10, 8, 8, 24]
+            headers_p  = ["figi (compositeFIGI)", "ticker", "exchange", "jurisd.", "company_name"]
+            sep = "  ".join("-" * w for w in col_widths)
+            fmt = "  ".join(f"{{:<{w}}}" for w in col_widths)
+            print()
+            print(fmt.format(*headers_p))
+            print(sep)
+            for row in all_rows[:20]:
+                print(fmt.format(
+                    row["figi"][:col_widths[0]],
+                    row["ticker"][:col_widths[1]],
+                    row["exchange"][:col_widths[2]],
+                    row["jurisdiction"][:col_widths[3]],
+                    row["company_name"][:col_widths[4]],
+                ))
+            if len(all_rows) > 20:
+                print(f"  … {len(all_rows) - 20} more rows in {out_path}")
+
+    except KeyboardInterrupt:
+        error_code = "INTERRUPTED"
+        print("\n[INFO] Run interrupted by user.", file=sys.stderr)
+    except requests.HTTPError as exc:
+        error_code = f"HTTP_{exc.response.status_code}"
+        print(f"\n[ERROR] HTTP error: {exc}", file=sys.stderr)
+    except Exception:
+        error_code = "EXCEPTION"
+        traceback.print_exc()
+    finally:
+        elapsed = time.monotonic() - t_start
+        append_run_log(
+            n_inputs=len(identifiers) if "identifiers" in dir() else 0,
+            n_hits=len(all_rows),
+            elapsed_sec=elapsed,
+            error_code=error_code,
+            out_path=Path(args.out),
+        )
+        print(f"\nRun log → {LOG_PATH}  ({error_code}, {elapsed:.1f}s, {len(all_rows)} hits)")
 
 
 if __name__ == "__main__":
