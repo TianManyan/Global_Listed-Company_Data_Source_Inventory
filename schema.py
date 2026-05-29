@@ -1,5 +1,5 @@
 """
-schema.py — TradeInt standard schema v2.2 field definitions.
+schema.py — TradeInt standard schema v2.3 field definitions.
 
 Single source of truth for FIELDNAMES used across all pull scripts.
 All scripts import from here instead of defining their own list.
@@ -7,9 +7,18 @@ All scripts import from here instead of defining their own list.
 Usage in scripts:
     from schema import FIELDNAMES, FILING_FIELDS, PROFILE_FIELDS
 
-Schema version: v2.2 (56 fields, 5 layers + Filing layer)
-Supersedes:     v2.1 (49 fields, 2026-05-25)
-Last updated:   2026-05-26
+Schema version: v2.3 (57 fields, 5 layers + Filing layer)
+Supersedes:     v2.2 (56 fields, 2026-05-26)
+Last updated:   2026-05-29
+
+Changelog v2.2 → v2.3
+----------------------
+Field count: 56 → 57
+Primary Key:  trade_int_id (#0) added — internal auto-increment integer.
+              Format: internal integer; external API uses "TI-{id:06d}" prefix.
+              Assigned by merge_v2.py at merge time; never sourced from external APIs.
+              Pull scripts leave this field blank — merge.py fills it.
+Design:       Supervisor decision 2026-05-29: Plan C (internal ID + LEI/ISIN dual index).
 
 Changelog v2.1 → v2.2
 ----------------------
@@ -24,11 +33,16 @@ New Layer 5: is_delisted (#48)
 """
 
 # ---------------------------------------------------------------------------
-# Full field list — output order for all CSV files (schema v2.2, 56 fields)
+# Full field list — output order for all CSV files (schema v2.3, 57 fields)
 # ---------------------------------------------------------------------------
 FIELDNAMES: list[str] = [
+    # Internal Primary Key (#0)
+    "trade_int_id",     # 0  Internal auto-increment integer PK. Assigned by merge_v2.py.
+                        #    External format: "TI-{id:06d}" (e.g. TI-000001).
+                        #    Pull scripts leave blank; never sourced from external APIs.
+
     # Layer 1 — Source Metadata (#1–3)
-    "source",           # 1  Data source identifier (SEC_EDGAR, EODHD, GLEIF, etc.)
+    "source",           # 1  Data source identifier (SEC_EDGAR, EODHD, GLEIF, etc.)           # 1  Data source identifier (SEC_EDGAR, EODHD, GLEIF, etc.)
     "exchange",         # 2  Exchange code (NYSE, SGX, LSE, etc.)
     "jurisdiction",     # 3  ISO-2 country code (US, SG, GB, etc.)
 
@@ -99,8 +113,8 @@ FIELDNAMES: list[str] = [
 # ---------------------------------------------------------------------------
 # Verify count
 # ---------------------------------------------------------------------------
-assert len(FIELDNAMES) == 56, f"Expected 56 fields, got {len(FIELDNAMES)}"
-assert len(set(FIELDNAMES)) == 56, "Duplicate field names detected"
+assert len(FIELDNAMES) == 57, f"Expected 57 fields, got {len(FIELDNAMES)}"
+assert len(set(FIELDNAMES)) == 57, "Duplicate field names detected"
 
 # ---------------------------------------------------------------------------
 # Subsets used by merge_v2.py
@@ -120,6 +134,7 @@ FILING_FIELDS: list[str] = [
 
 # Profile fields = all FIELDNAMES + merge metadata (added by merge_v2.py)
 PROFILE_FIELDS: list[str] = FIELDNAMES + ["source_list", "match_confidence", "merge_date"]
+# Note: trade_int_id is already in FIELDNAMES (#0); merge_v2.py populates it at merge time.
 
 # ---------------------------------------------------------------------------
 # completeness_score weighted fields (used by merge_v2.py)
@@ -150,6 +165,41 @@ SCORE_WEIGHT_HALF: list[str] = [
 # officers, cusip, ipo_date, fiscal_year_end, phone, cross_listings
 
 SCORE_MAX: float = len(SCORE_WEIGHT_1) * 1.0 + len(SCORE_WEIGHT_HALF) * 0.5  # = 20.0
+
+# ---------------------------------------------------------------------------
+# trade_int_id helpers
+# ---------------------------------------------------------------------------
+
+def format_trade_int_id(internal_id: int) -> str:
+    """
+    Convert internal integer ID to external TI-prefixed string.
+
+    Internal (DB / CSV): 1, 2, 3, …
+    External (API / UI): "TI-000001", "TI-000002", "TI-000003", …
+
+    Usage:
+        format_trade_int_id(1)       → "TI-000001"
+        format_trade_int_id(42)      → "TI-000042"
+        format_trade_int_id(999999)  → "TI-999999"
+        format_trade_int_id(1000000) → "TI-1000000"  # no truncation
+    """
+    return f"TI-{internal_id:06d}"
+
+
+def parse_trade_int_id(external_id: str) -> int:
+    """
+    Convert external TI-prefixed string back to internal integer.
+
+    Raises ValueError if the string is not a valid TI-XXXXXX identifier.
+
+    Usage:
+        parse_trade_int_id("TI-000001") → 1
+        parse_trade_int_id("TI-000042") → 42
+    """
+    if not external_id.upper().startswith("TI-"):
+        raise ValueError(f"Not a valid trade_int_id: {external_id!r}")
+    return int(external_id[3:])
+
 
 # ---------------------------------------------------------------------------
 # Controlled vocabularies
