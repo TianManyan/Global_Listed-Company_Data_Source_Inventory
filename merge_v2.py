@@ -53,17 +53,34 @@ from datetime import date, datetime
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Schema — imported from schema.py (single source of truth)
+# Schema — field definitions (imported from schema.py v2.3, 57 fields)
 # ---------------------------------------------------------------------------
-from schema import (  # noqa: E402
-    FIELDNAMES as _ALL_FIELDS,
+
+# Field lists — imported from schema.py (single source of truth for v2.3, 57 fields)
+# PROFILE_FIELDS = schema.PROFILE_FIELDS + merge metadata columns (see below)
+# FILING_FIELDS  = schema.FILING_FIELDS
+# FILING_EVENT_FIELDS = schema.FILING_EVENT_FIELDS
+from schema import (
+    PROFILE_FIELDS as _SCHEMA_PROFILE_FIELDS,
     FILING_FIELDS,
     FILING_EVENT_FIELDS,
-    SOURCE_TRUST_ORDER,
+    SCORE_WEIGHT_1,
+    SCORE_WEIGHT_HALF,
+    SCORE_MAX,
+    SOURCE_TRUST_ORDER as _SCHEMA_TRUST_ORDER,
 )
 
-# merge_v2.py adds three metadata columns to the profile output
-PROFILE_FIELDS: list[str] = _ALL_FIELDS + ["source_list", "match_confidence", "merge_date"]
+# PROFILE_FIELDS: schema.PROFILE_FIELDS already includes trade_int_id (#0)
+# and the three merge-metadata columns (source_list, match_confidence, merge_date).
+# Use it directly — do NOT append the metadata columns again.
+PROFILE_FIELDS: list[str] = _SCHEMA_PROFILE_FIELDS
+# trade_int_id is FIELDNAMES[0]; merge_v2.py assigns the integer at run time.
+
+# Add trade_int_id as foreign key in filing rows so filings can be linked back
+FILING_FIELDS = ["trade_int_id"] + list(FILING_FIELDS)
+
+# SOURCE_TRUST_ORDER imported from schema.py (see import block above)
+SOURCE_TRUST_ORDER = _SCHEMA_TRUST_ORDER
 
 def _trust_rank(source: str) -> int:
     """Lower = more trusted. Unknown sources get rank 99."""
@@ -104,10 +121,9 @@ LATEST_PAIRS: list[tuple[str, str]] = [
 
 
 # ---------------------------------------------------------------------------
+# completeness_score — SCORE_WEIGHT_1, SCORE_WEIGHT_HALF, SCORE_MAX
+# imported from schema.py (see import block above)
 # ---------------------------------------------------------------------------
-# completeness_score — weights imported from schema.py (single source of truth)
-# ---------------------------------------------------------------------------
-from schema import SCORE_WEIGHT_1, SCORE_WEIGHT_HALF, SCORE_MAX  # noqa: E402
 
 
 def compute_completeness(profile: dict) -> float:
@@ -514,6 +530,40 @@ def run_merge(
         profile = merge_rows(rows)
         profiles.append(profile)
 
+    # ── Assign trade_int_id ───────────────────────────────────────────────────
+    # Sequential integer starting at 1; order follows entity_groups iteration order.
+    # External format TI-XXXXXX is derived on read via schema.format_trade_int_id().
+    for idx, profile in enumerate(profiles, start=1):
+        profile["trade_int_id"] = str(idx)
+
+    # Propagate trade_int_id to filing rows (link filings back to their company)
+    # Build lookup: canonical_key → trade_int_id
+    # We reconstruct the key from the merged profile using its best available identifier.
+    _key_to_tid: dict[str, str] = {}
+    for profile in profiles:
+        tid = profile["trade_int_id"]
+        if profile.get("lei", "").strip():
+            _key_to_tid[profile["lei"].strip().upper()] = tid
+        if profile.get("isin", "").strip():
+            _key_to_tid[profile["isin"].strip().upper()] = tid
+        ticker  = profile.get("ticker", "").strip().upper()
+        exchange = profile.get("exchange", "").strip().upper()
+        if ticker and exchange:
+            _key_to_tid[f"{ticker}|{exchange}"] = tid
+
+    for filing in filings:
+        # Try LEI first, then ISIN, then ticker+exchange
+        lei_val  = filing.get("lei", "").strip().upper()
+        tid = _key_to_tid.get(lei_val, "")
+        if not tid:
+            # Try via company_name normalisation as last resort
+            norm = _normalise(filing.get("company_name", ""))
+            for profile in profiles:
+                if _normalise(profile.get("company_name", "")) == norm:
+                    tid = profile["trade_int_id"]
+                    break
+        filing["trade_int_id"] = tid
+
     # ── Write outputs ─────────────────────────────────────────────────────────
     write_csv(profiles, PROFILE_FIELDS, profiles_out)
     write_csv(filings,  FILING_FIELDS,  filings_out)
@@ -571,7 +621,7 @@ def main() -> None:
     profiles_out = Path(args.profiles)
     filings_out  = Path(args.filings)
 
-    print(f"merge.py v2.0 — TradeInt entity-centric merge")
+    print(f"merge_v2.py v2.1 — TradeInt entity-centric merge (schema v2.3)")
     print(f"  Input files : {len(input_paths)}")
     print(f"  Profiles out: {profiles_out}")
     print(f"  Filings out : {filings_out}")
